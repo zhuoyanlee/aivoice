@@ -1,0 +1,45 @@
+{
+  "name": "ai-voice-call-router",
+  "version": "1.0.0",
+  "description": "Node.js app to route OnSIP calls through Asterisk to Azure Speech AI",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "test": "jest",
+    "docker:build": "docker build -t ai-voice-router .",
+    "docker:run": "docker run -p 3000:3000 -p 5060:5060/udp ai-voice-router"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "jssip": "^3.10.1",
+    "ws": "^8.14.2",
+    "microsoft-cognitiveservices-speech-sdk": "^1.33.1",
+    "node-fetch": "^2.7.0",
+    "dotenv": "^16.3.1",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "winston": "^3.11.0",
+    "asterisk-manager": "^0.1.15"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "jest": "^29.7.0",
+    "supertest": "^6.3.3"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "voip",
+    "sip",
+    "asterisk",
+    "azure",
+    "speech",
+    "ai",
+    "onsip",
+    "voice-assistant"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}

@@ -1,0 +1,195 @@
+; ===============================================
+; extensions.conf - Asterisk Dialplan Configuration
+; ===============================================
+
+[general]
+static=yes
+writeprotect=no
+clearglobalvars=no
+
+[globals]
+AI_ASSISTANT_URL=http://localhost:3000
+
+[ai-context]
+; Context for AI assistant calls
+exten => ai-assistant,1,NoOp(AI Assistant Call Started)
+ same => n,Set(CALL_ID=${CHANNEL(uniqueid)})
+ same => n,Set(WEBHOOK_URL=${AI_ASSISTANT_URL}/asterisk/events)
+ same => n,Answer()
+ same => n,Set(CHANNEL(hangup_handler_push)=hangup-handler,s,1)
+ same => n,StartMixMonitor(${CALL_ID}.wav,b)
+ same => n,Set(TIMEOUT(absolute)=1800)
+ same => n,AGI(ai-assistant.agi,${CALL_ID})
+ same => n,Hangup()
+
+exten => h,1,NoOp(Call Ended)
+ same => n,StopMixMonitor()
+
+[hangup-handler]
+exten => s,1,NoOp(Hangup Handler)
+ same => n,System(curl -X POST ${WEBHOOK_URL} -H "Content-Type: application/json" -d '{"type":"CallEnded","channel":"${CHANNEL}","uniqueid":"${UNIQUEID}"}')
+
+; ===============================================
+; sip.conf - SIP Configuration
+; ===============================================
+
+[general]
+context=default
+allowoverlap=no
+udpbindaddr=0.0.0.0:5060
+tcpenable=no
+tcpbindaddr=0.0.0.0:5060
+transport=udp
+srvlookup=yes
+allowguest=yes
+alwaysauthreject=yes
+musiconhold=default
+mohinterpret=default
+mohsuggest=default
+
+; Codec preferences
+disallow=all
+allow=ulaw
+allow=alaw
+allow=gsm
+
+; RTP Configuration
+rtpstart=10000
+rtpend=20000
+
+; Registration with OnSIP
+register => username:password@sip.onsip.com/username
+
+[onsip-trunk]
+type=peer
+host=sip.onsip.com
+username=your_onsip_username
+secret=your_onsip_password
+fromuser=your_onsip_username
+fromdomain=yourdomain.onsip.com
+context=ai-context
+insecure=port,invite
+canreinvite=no
+qualify=yes
+
+; ===============================================
+; http.conf - HTTP Server Configuration
+; ===============================================
+
+[general]
+enabled=yes
+bindaddr=0.0.0.0
+bindport=8088
+prefix=asterisk
+
+; ===============================================
+; ari.conf - Asterisk REST Interface Configuration
+; ===============================================
+
+[general]
+enabled=yes
+pretty=yes
+
+[admin]
+type=user
+read_only=no
+password=admin
+
+; ===============================================
+; rtp.conf - RTP Configuration
+; ===============================================
+
+[general]
+rtpstart=10000
+rtpend=20000
+rtpchecksums=no
+dtmftimeout=3000
+rtcpinterval=5000
+
+; ===============================================
+; AGI Script: ai-assistant.agi
+; ===============================================
+#!/usr/bin/env node
+
+const { spawn } = require('child_process');
+const fs = require('fs');
+
+class AsteriskAGI {
+  constructor() {
+    this.env = {};
+    this.parseAGIEnvironment();
+  }
+
+  parseAGIEnvironment() {
+    // Read AGI environment variables
+    const input = process.stdin;
+    let buffer = '';
+
+    input.on('data', (data) => {
+      buffer += data.toString();
+      const lines = buffer.split('\n');
+      
+      for (let line of lines) {
+        if (line.trim() === '') {
+          this.startAGI();
+          return;
+        }
+        
+        const [key, value] = line.split(': ');
+        if (key && value) {
+          this.env[key.replace('agi_', '')] = value;
+        }
+      }
+    });
+  }
+
+  async startAGI() {
+    const callId = process.argv[2] || this.env.uniqueid;
+    
+    console.log(`AGI: Starting AI assistant for call ${callId}`);
+    
+    // Send event to Node.js app
+    await this.notifyCallStart(callId);
+    
+    // Keep the AGI script running to maintain the call
+    setInterval(() => {
+      this.sendCommand('NOOP', 'AI Assistant Active');
+    }, 30000);
+  }
+
+  async notifyCallStart(callId) {
+    const webhook = process.env.AI_ASSISTANT_URL + '/asterisk/events';
+    const payload = {
+      type: 'AGIStart',
+      callId: callId,
+      channel: this.env.channel,
+      callerid: this.env.callerid
+    };
+
+    try {
+      const response = await fetch(webhook, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      console.log('AGI: Notified Node.js app of call start');
+    } catch (error) {
+      console.error('AGI: Error notifying app:', error);
+    }
+  }
+
+  sendCommand(command, params = '') {
+    const cmd = params ? `${command} ${params}` : command;
+    process.stdout.write(cmd + '\n');
+    
+    return new Promise((resolve) => {
+      process.stdin.once('data', (data) => {
+        resolve(data.toString().trim());
+      });
+    });
+  }
+}
+
+if (require.main === module) {
+  new AsteriskAGI();
+}
