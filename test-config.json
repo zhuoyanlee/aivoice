@@ -1,0 +1,264 @@
+{
+  "testHarness": {
+    "port": 3001,
+    "wsPort": 3002,
+    "targetApp": "http://localhost:3000",
+    "testAudioDir": "./test_audio",
+    "logLevel": "info"
+  },
+  "testScenarios": {
+    "basic_incoming_call": {
+      "name": "Basic Incoming Call",
+      "description": "Simulates a simple incoming call without audio processing",
+      "type": "incoming_call",
+      "config": {
+        "fromNumber": "+1234567890",
+        "toNumber": "+0987654321",
+        "duration": 3000,
+        "withAudio": false
+      }
+    },
+    "incoming_call_with_audio": {
+      "name": "Incoming Call with Audio",
+      "description": "Simulates an incoming call with audio stream processing",
+      "type": "incoming_call",
+      "config": {
+        "fromNumber": "+1234567890",
+        "toNumber": "+0987654321",
+        "duration": 10000,
+        "withAudio": true
+      }
+    },
+    "outgoing_call": {
+      "name": "Outgoing Call",
+      "description": "Tests the system's ability to make outgoing calls",
+      "type": "outgoing_call",
+      "config": {
+        "fromNumber": "+0987654321",
+        "toNumber": "+1234567890"
+      }
+    },
+    "audio_processing_speech": {
+      "name": "Audio Processing - Speech",
+      "description": "Tests speech recognition and processing",
+      "type": "audio_processing",
+      "config": {
+        "audioType": "speech",
+        "expectedDuration": 2000
+      }
+    },
+    "audio_processing_conversation": {
+      "name": "Audio Processing - Conversation",
+      "description": "Tests conversation audio processing",
+      "type": "audio_processing",
+      "config": {
+        "audioType": "conversation",
+        "expectedDuration": 5000
+      }
+    },
+    "asterisk_basic_events": {
+      "name": "Asterisk Basic Events",
+      "description": "Tests basic Asterisk event handling",
+      "type": "asterisk_integration",
+      "config": {
+        "events": [
+          "Newchannel",
+          "Dial",
+          "Hangup"
+        ]
+      }
+    },
+    "asterisk_complex_flow": {
+      "name": "Asterisk Complex Flow",
+      "description": "Tests complex Asterisk call flow scenarios",
+      "type": "asterisk_integration",
+      "config": {
+        "events": [
+          "Newchannel",
+          "Dial",
+          "DialBegin",
+          "DialEnd",
+          "Hangup"
+        ],
+        "simulateTransfer": true
+      }
+    },
+    "azure_speech_stt": {
+      "name": "Azure Speech - Speech to Text",
+      "description": "Tests Azure Speech-to-Text functionality",
+      "type": "azure_speech",
+      "config": {
+        "testType": "stt",
+        "language": "en-US",
+        "audioFile": "test_audio/sample_speech.wav"
+      }
+    },
+    "azure_speech_tts": {
+      "name": "Azure Speech - Text to Speech",
+      "description": "Tests Azure Text-to-Speech functionality",
+      "type": "azure_speech",
+      "config": {
+        "testType": "tts",
+        "voice": "en-US-AriaNeural",
+        "text": "Hello, this is a test of the text to speech system."
+      }
+    },
+    "azure_speech_conversation": {
+      "name": "Azure Speech - Conversation",
+      "description": "Tests full conversation flow with Azure Speech",
+      "type": "azure_speech",
+      "config": {
+        "testType": "conversation",
+        "language": "en-US",
+        "voice": "en-US-AriaNeural",
+        "conversationRounds": 3
+      }
+    },
+    "full_integration": {
+      "name": "Full Integration Test",
+      "description": "Runs a complete end-to-end test of all components",
+      "type": "full_integration",
+      "config": {
+        "includeAudio": true,
+        "includeAsterisk": true,
+        "includeAzure": true,
+        "duration": 15000
+      }
+    },
+    "stress_test": {
+      "name": "Stress Test",
+      "description": "Tests system performance under load",
+      "type": "stress_test",
+      "config": {
+        "concurrentCalls": 5,
+        "callDuration": 30000,
+        "rampUpTime": 5000
+      }
+    },
+    "error_handling": {
+      "name": "Error Handling Test",
+      "description": "Tests system behavior under error conditions",
+      "type": "error_handling",
+      "config": {
+        "scenarios": [
+          "invalid_phone_number",
+          "network_timeout",
+          "audio_processing_error",
+          "asterisk_connection_failure"
+        ]
+      }
+    }
+  },
+  "testSuites": {
+    "smoke": {
+      "name": "Smoke Tests",
+      "description": "Basic functionality tests",
+      "scenarios": [
+        "basic_incoming_call",
+        "audio_processing_speech",
+        "asterisk_basic_events"
+      ]
+    },
+    "integration": {
+      "name": "Integration Tests",
+      "description": "Component integration tests",
+      "scenarios": [
+        "incoming_call_with_audio",
+        "outgoing_call",
+        "asterisk_complex_flow",
+        "azure_speech_conversation"
+      ]
+    },
+    "full": {
+      "name": "Full Test Suite",
+      "description": "Complete test coverage",
+      "scenarios": [
+        "basic_incoming_call",
+        "incoming_call_with_audio",
+        "outgoing_call",
+        "audio_processing_speech",
+        "audio_processing_conversation",
+        "asterisk_basic_events",
+        "asterisk_complex_flow",
+        "azure_speech_stt",
+        "azure_speech_tts",
+        "azure_speech_conversation",
+        "full_integration"
+      ]
+    },
+    "performance": {
+      "name": "Performance Tests",
+      "description": "Performance and stress tests",
+      "scenarios": [
+        "stress_test",
+        "error_handling"
+      ]
+    }
+  },
+  "mockData": {
+    "phoneNumbers": {
+      "testNumbers": [
+        "+1234567890",
+        "+0987654321",
+        "+1555123456",
+        "+1555987654"
+      ],
+      "invalidNumbers": [
+        "123",
+        "invalid",
+        "+9999999999"
+      ]
+    },
+    "audioFiles": {
+      "speech": "test_audio/sample_speech.wav",
+      "conversation": "test_audio/sample_conversation.wav",
+      "silence": "test_audio/silence.wav",
+      "noise": "test_audio/background_noise.wav"
+    },
+    "asteriskEvents": {
+      "newChannel": {
+        "event": "Newchannel",
+        "channel": "SIP/test-1",
+        "uniqueid": "test-call-1",
+        "timestamp": "2024-01-01T00:00:00.000Z"
+      },
+      "dialBegin": {
+        "event": "DialBegin",
+        "channel": "SIP/test-1",
+        "destination": "SIP/test-2",
+        "uniqueid": "test-call-1"
+      },
+      "dialEnd": {
+        "event": "DialEnd",
+        "channel": "SIP/test-1",
+        "destination": "SIP/test-2",
+        "uniqueid": "test-call-1",
+        "duration": 30
+      },
+      "hangup": {
+        "event": "Hangup",
+        "channel": "SIP/test-1",
+        "uniqueid": "test-call-1",
+        "cause": "16"
+      }
+    }
+  },
+  "assertions": {
+    "callDuration": {
+      "min": 1000,
+      "max": 60000
+    },
+    "audioProcessing": {
+      "maxLatency": 2000,
+      "minQuality": 0.8
+    },
+    "asteriskEvents": {
+      "maxResponseTime": 1000,
+      "requiredEvents": ["Newchannel", "Hangup"]
+    },
+    "azureSpeech": {
+      "maxLatency": 3000,
+      "minAccuracy": 0.9
+    }
+  }
+}
