@@ -26,7 +26,7 @@ class_name = "WebSocketHandler"
 # Migrations for Durable Objects
 [[migrations]]
 tag = "v1"
-new_classes = ["WebSocketHandler"]
+new_sqlite_classes  = ["WebSocketHandler"]
 
 [[rules]]
 type = "ESModule"
@@ -40,7 +40,3 @@ vars = { NODE_ENV = "staging" }
 [env.production]
 name = "twilio-voice-transcription-prod"
 vars = { NODE_ENV = "production" }
-
-# Worker limits
-[limits]
-cpu_ms = 30000
