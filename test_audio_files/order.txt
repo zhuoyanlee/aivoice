@@ -1,0 +1,11 @@
+Mock audio file for testing
+In a real implementation, this would be actual WAV audio data
+For testing purposes, this file contains metadata about the expected audio
+
+Expected content: "hello, may i place an order"
+Duration: 3000ms
+Sample Rate: 8000Hz
+Quality: High
+Format: WAV
+Channels: 1
+Bit Depth: 16
