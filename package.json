@@ -4,7 +4,8 @@
   "description": "Real-time voice transcription service using Twilio Media Streams and Azure Speech Services",
   "main": "app.js",
   "scripts": {
-    "start": "node --env-file=local.env app.js",
+    "start": "node app.js",
+    "local": "node --env-file=local.env app.js",
     "dev": "nodemon app.js",
     "test": "jest",
     "lint": "eslint .",
