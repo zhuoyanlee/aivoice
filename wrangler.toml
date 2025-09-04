@@ -1,0 +1,37 @@
+name = "twilio-realtime-voice-transcription"
+main = "app.js"
+compatibility_date = "2024-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Environment variables (don't put secrets here)
+[vars]
+NODE_ENV = "production"
+
+# KV Namespace for storing transcriptions
+[[kv_namespaces]]
+binding = "TRANSCRIPTIONS"
+id = "caecbaccaa704c93bf2a26e55260a6a1"
+preview_id = "cfc18846866541fd93c42de3cf34abd1"
+
+# R2 Bucket for audio file storage
+[[r2_buckets]]
+binding = "AUDIO_BUCKET"
+bucket_name = "twilio-transcriptions"
+
+# Durable Objects for WebSocket handling
+[[durable_objects.bindings]]
+name = "WEBSOCKET_HANDLER"
+class_name = "WebSocketHandler"
+
+# Environment-specific configurations
+[env.staging]
+name = "twilio-voice-transcription-staging"
+vars = { NODE_ENV = "staging" }
+
+[env.production]
+name = "twilio-voice-transcription-prod"
+vars = { NODE_ENV = "production" }
+
+# Worker limits
+[limits]
+cpu_ms = 30000
