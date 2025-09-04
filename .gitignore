@@ -1,1 +1,3 @@
 environment-backup.env
+local.env
+node_modules/*

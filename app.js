@@ -1,658 +1,555 @@
 const express = require('express');
-const JsSIP = require('jssip');
+const http = require('http');
 const WebSocket = require('ws');
-const { exec } = require('child_process');
+const twilio = require('twilio');
+const sdk = require('microsoft-cognitiveservices-speech-sdk');
+const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-const { promisify } = require('util');
-const EventEmitter = require('events');
-
-// Azure Speech SDK
-const sdk = require('microsoft-cognitiveservices-speech-sdk');
-
-// Configuration
-const config = {
-  port: 3000,
-  sip: {
-    port: 5060,
-    host: '0.0.0.0',
-    username: process.env.ONSIP_USERNAME || 'alex',
-    password: process.env.ONSIP_PASSWORD || 'your_onsip_password',
-    domain: process.env.ONSIP_DOMAIN || 'beanit.onsip.com'
-  },
-  asterisk: {
-    host: process.env.ASTERISK_HOST || 'localhost',
-    port: process.env.ASTERISK_PORT || 8088,
-    username: process.env.ASTERISK_USERNAME || 'admin',
-    password: process.env.ASTERISK_PASSWORD || 'admin'
-  },
-  azure: {
-    speechKey: process.env.AZURE_SPEECH_KEY || 'your_azure_speech_key',
-    speechRegion: process.env.AZURE_SPEECH_REGION || 'eastus',
-    openaiKey: process.env.OPENAI_API_KEY || 'your_openai_key'
-  },
-  audio: {
-    tempDir: './temp_audio',
-    sampleRate: 8000,
-    channels: 1,
-    format: 'wav'
-  }
-};
-
-class VoiceCallRouter extends EventEmitter {
-  constructor() {
-    super();
-    this.app = express();
-    this.activeCalls = new Map();
-    this.setupDirectories();
-    this.setupExpress();
-    this.setupSIP();
-  }
-
-  setupDirectories() {
-    if (!fs.existsSync(config.audio.tempDir)) {
-      fs.mkdirSync(config.audio.tempDir, { recursive: true });
-    }
-  }
-
-  setupExpress() {
-    this.app.use(express.json());
-    this.app.use(express.urlencoded({ extended: true }));
-
-    // Health check endpoint
-    this.app.get('/health', (req, res) => {
-      res.json({ 
-        status: 'ok', 
-        activeCalls: this.activeCalls.size,
-        timestamp: new Date().toISOString()
-      });
-    });
-
-    // Call status endpoint
-    this.app.get('/calls', (req, res) => {
-      const calls = Array.from(this.activeCalls.entries()).map(([id, call]) => ({
-        id,
-        status: call.status,
-        startTime: call.startTime,
-        duration: Date.now() - call.startTime
-      }));
-      res.json({ calls });
-    });
-
-    // Webhook for Asterisk events
-    this.app.post('/asterisk/events', (req, res) => {
-      this.handleAsteriskEvent(req.body);
-      res.json({ received: true });
-    });
-  }
-
-  setupSIP() {
-    // JsSIP setup for OnSIP integration
-    try {
-      // Create JsSIP User Agent
-      const socket = new JsSIP.WebSocketInterface(`wss://${config.sip.domain}:5061`);
-      console.log(`setting up SIP ${config.sip.domain}`)
-      this.userAgent = new JsSIP.UA({
-        sockets: [socket],
-        uri: `sip:${config.sip.username}@${config.sip.domain}`,
-        password: config.sip.password,
-        realm: config.sip.domain
-      });
-
-      // Set up event handlers
-      this.userAgent.on('registered', () => {
-        console.log('SIP registration successful');
-      });
-
-      this.userAgent.on('registrationFailed', (response) => {
-        console.error('SIP registration failed:', response.cause);
-      });
-
-      this.userAgent.on('invite', (session) => {
-        this.handleIncomingCall(session);
-      });
-
-      this.userAgent.on('message', (message) => {
-        this.handleSIPMessage(message);
-      });
-
-      // Start the user agent
-      this.userAgent.start();
-      console.log(`JsSIP User Agent started for ${config.sip.username}@${config.sip.domain}`);
-      
-    } catch (error) {
-      console.error('Error setting up JsSIP:', error);
-    }
-  }
-
-  async handleSIPMessage(message) {
-    console.log('Received SIP message:', message.request.method);
-
-    switch (message.request.method) {
-      case 'MESSAGE':
-        await this.handleSIPMessage(message);
-        break;
-      default:
-        console.log('Unhandled SIP method:', message.request.method);
-    }
-  }
-
-  async handleIncomingCall(session) {
-    const callId = this.generateCallId();
-    const fromNumber = this.extractPhoneNumber(session.remote_identity.uri.user);
-    
-    console.log(`Incoming call ${callId} from ${fromNumber}`);
-
-    // Create call session
-    const callSession = {
-      id: callId,
-      fromNumber,
-      status: 'ringing',
-      startTime: Date.now(),
-      sipSession: session,
-      asteriskChannel: null,
-      speechRecognizer: null,
-      speechSynthesizer: null,
-      conversationHistory: []
-    };
-
-    this.activeCalls.set(callId, callSession);
-
-    try {
-      // Accept the call
-      session.accept({
-        mediaConstraints: { audio: true, video: false },
-        pcConfig: {
-          iceServers: [
-            { urls: ['stun:stun.l.google.com:19302'] }
-          ]
-        }
-      });
-
-      // Set up session event handlers
-      session.on('accepted', () => {
-        console.log(`Call ${callId} accepted`);
-        callSession.status = 'connected';
-      });
-
-      session.on('ended', () => {
-        console.log(`Call ${callId} ended`);
-        this.endCall(callId);
-      });
-
-      session.on('failed', (response) => {
-        console.error(`Call ${callId} failed:`, response.cause);
-        this.endCall(callId);
-      });
-
-      // Route to Asterisk
-      await this.routeToAsterisk(callSession, session);
-      
-    } catch (error) {
-      console.error('Error handling incoming call:', error);
-      session.terminate();
-    }
-  }
-
-  async routeToAsterisk(callSession, invite) {
-    try {
-      // Create Asterisk channel via ARI (Asterisk REST Interface)
-      const channelData = {
-        endpoint: `SIP/${callSession.fromNumber}`,
-        extension: 'ai-assistant',
-        context: 'ai-context',
-        priority: 1,
-        callerId: callSession.fromNumber,
-        variables: {
-          CALL_ID: callSession.id
-        }
-      };
-
-      const asteriskResponse = await this.makeAsteriskRequest('POST', '/channels', channelData);
-      callSession.asteriskChannel = asteriskResponse.id;
-      callSession.status = 'connected';
-
-      console.log(`Call ${callSession.id} routed to Asterisk channel ${asteriskResponse.id}`);
-
-      // Setup audio streaming
-      await this.setupAudioStreaming(callSession);
-
-    } catch (error) {
-      console.error('Error routing to Asterisk:', error);
-      callSession.status = 'error';
-    }
-  }
-
-  async setupAudioStreaming(callSession) {
-    try {
-      // Setup Azure Speech Recognition
-      const speechConfig = sdk.SpeechConfig.fromSubscription(
-        config.azure.speechKey, 
-        config.azure.speechRegion
-      );
-      speechConfig.speechRecognitionLanguage = 'en-US';
-
-      // Setup audio config for streaming
-      const audioConfig = sdk.AudioConfig.fromDefaultMicrophoneInput();
-      
-      callSession.speechRecognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
-
-      // Setup speech events
-      callSession.speechRecognizer.recognizing = (s, e) => {
-        console.log(`RECOGNIZING: Text=${e.result.text}`);
-      };
-
-      callSession.speechRecognizer.recognized = async (s, e) => {
-        if (e.result.reason === sdk.ResultReason.RecognizedSpeech) {
-          console.log(`RECOGNIZED: Text=${e.result.text}`);
-          await this.processUserSpeech(callSession, e.result.text);
-        }
-      };
-
-      callSession.speechRecognizer.canceled = (s, e) => {
-        console.log(`CANCELED: Reason=${e.reason}`);
-        if (e.reason === sdk.CancellationReason.Error) {
-          console.log(`Error details: ${e.errorDetails}`);
-        }
-      };
-
-      callSession.speechRecognizer.sessionStopped = (s, e) => {
-        console.log('Speech recognition session stopped');
-        callSession.speechRecognizer.stopContinuousRecognitionAsync();
-      };
-
-      // Start continuous recognition
-      callSession.speechRecognizer.startContinuousRecognitionAsync();
-
-      // Setup Text-to-Speech
-      const ttsConfig = sdk.SpeechConfig.fromSubscription(
-        config.azure.speechKey, 
-        config.azure.speechRegion
-      );
-      ttsConfig.speechSynthesisVoiceName = 'en-US-JennyNeural';
-
-      callSession.speechSynthesizer = new sdk.SpeechSynthesizer(ttsConfig);
-
-      console.log(`Audio streaming setup complete for call ${callSession.id}`);
-
-    } catch (error) {
-      console.error('Error setting up audio streaming:', error);
-    }
-  }
-
-  async processUserSpeech(callSession, recognizedText) {
-    try {
-      console.log(`Processing speech for call ${callSession.id}: "${recognizedText}"`);
-
-      // Add user message to conversation history
-      callSession.conversationHistory.push({
-        role: 'user',
-        content: recognizedText,
-        timestamp: new Date().toISOString()
-      });
-
-      // Generate AI response using OpenAI
-      const aiResponse = await this.generateAIResponse(callSession.conversationHistory);
-
-      // Add AI response to conversation history
-      callSession.conversationHistory.push({
-        role: 'assistant',
-        content: aiResponse,
-        timestamp: new Date().toISOString()
-      });
-
-      // Convert AI response to speech and play it
-      await this.speakResponse(callSession, aiResponse);
-
-    } catch (error) {
-      console.error('Error processing user speech:', error);
-      await this.speakResponse(callSession, "I'm sorry, I didn't understand that. Could you please repeat?");
-    }
-  }
-
-  async generateAIResponse(conversationHistory) {
-    try {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${config.azure.openaiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: 'gpt-3.5-turbo',
-          messages: [
-            {
-              role: 'system',
-              content: 'You are a helpful AI assistant in a phone conversation. Keep responses concise and natural for spoken dialogue. Avoid using formatting, bullet points, or long explanations.'
-            },
-            ...conversationHistory
-          ],
-          max_tokens: 150,
-          temperature: 0.7
-        })
-      });
-
-      const data = await response.json();
-      return data.choices[0].message.content.trim();
-
-    } catch (error) {
-      console.error('Error generating AI response:', error);
-      return "I'm experiencing some technical difficulties. How can I help you today?";
-    }
-  }
-
-  async speakResponse(callSession, text) {
-    try {
-      console.log(`Speaking response for call ${callSession.id}: "${text}"`);
-
-      // Generate speech using Azure TTS
-      const audioFileName = `${callSession.id}_${Date.now()}.wav`;
-      const audioPath = path.join(config.audio.tempDir, audioFileName);
-
-      const audioConfig = sdk.AudioConfig.fromAudioFileOutput(audioPath);
-      const synthesizer = new sdk.SpeechSynthesizer(
-        callSession.speechSynthesizer.speechConfig, 
-        audioConfig
-      );
-
-      return new Promise((resolve, reject) => {
-        synthesizer.speakTextAsync(text, 
-          async (result) => {
-            if (result.reason === sdk.ResultReason.SynthesizingAudioCompleted) {
-              console.log(`Speech synthesis completed for call ${callSession.id}`);
-              
-              // Play audio through Asterisk
-              await this.playAudioThroughAsterisk(callSession, audioPath);
-              
-              // Cleanup
-              synthesizer.close();
-              setTimeout(() => {
-                if (fs.existsSync(audioPath)) {
-                  fs.unlinkSync(audioPath);
-                }
-              }, 5000);
-              
-              resolve();
-            } else {
-              console.error('Speech synthesis failed:', result.errorDetails);
-              synthesizer.close();
-              reject(new Error(result.errorDetails));
-            }
-          },
-          (error) => {
-            console.error('Speech synthesis error:', error);
-            synthesizer.close();
-            reject(error);
-          }
-        );
-      });
-
-    } catch (error) {
-      console.error('Error in speakResponse:', error);
-    }
-  }
-
-  async playAudioThroughAsterisk(callSession, audioPath) {
-    try {
-      if (!callSession.asteriskChannel) {
-        console.error('No Asterisk channel available for call', callSession.id);
-        return;
-      }
-
-      // Use Asterisk ARI to play the audio file
-      const playData = {
-        media: `sound:${audioPath}`,
-        lang: 'en'
-      };
-
-      await this.makeAsteriskRequest(
-        'POST', 
-        `/channels/${callSession.asteriskChannel}/play`,
-        playData
-      );
-
-      console.log(`Audio played through Asterisk for call ${callSession.id}`);
-
-    } catch (error) {
-      console.error('Error playing audio through Asterisk:', error);
-    }
-  }
-
-  async makeAsteriskRequest(method, endpoint, data = null) {
-    const url = `http://${config.asterisk.host}:${config.asterisk.port}/ari${endpoint}`;
-    const auth = Buffer.from(`${config.asterisk.username}:${config.asterisk.password}`).toString('base64');
-
-    const options = {
-      method,
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'application/json'
-      }
-    };
-
-    if (data && (method === 'POST' || method === 'PUT')) {
-      options.body = JSON.stringify(data);
-    }
-
-    const response = await fetch(url, options);
-    
-    if (!response.ok) {
-      throw new Error(`Asterisk API error: ${response.status} ${response.statusText}`);
-    }
-
-    return response.json();
-  }
-
-  handleAsteriskEvent(event) {
-    console.log('Asterisk event:', event.type);
-
-    switch (event.type) {
-      case 'ChannelStateChange':
-        this.handleChannelStateChange(event);
-        break;
-      case 'ChannelDestroyed':
-        this.handleChannelDestroyed(event);
-        break;
-      case 'PlaybackFinished':
-        this.handlePlaybackFinished(event);
-        break;
-      default:
-        console.log('Unhandled Asterisk event:', event.type);
-    }
-  }
-
-  handleChannelStateChange(event) {
-    const callSession = this.findCallByAsteriskChannel(event.channel.id);
-    if (callSession) {
-      console.log(`Channel ${event.channel.id} state changed to ${event.channel.state}`);
-      
-      if (event.channel.state === 'Up') {
-        callSession.status = 'active';
-        this.startConversation(callSession);
-      }
-    }
-  }
-
-  async startConversation(callSession) {
-    try {
-      // Initial greeting
-      const greeting = "Hello! I'm your AI assistant. How can I help you today?";
-      await this.speakResponse(callSession, greeting);
-      
-      callSession.conversationHistory.push({
-        role: 'assistant',
-        content: greeting,
-        timestamp: new Date().toISOString()
-      });
-
-    } catch (error) {
-      console.error('Error starting conversation:', error);
-    }
-  }
-
-  handleChannelDestroyed(event) {
-    const callSession = this.findCallByAsteriskChannel(event.channel.id);
-    if (callSession) {
-      console.log(`Call ${callSession.id} ended - channel destroyed`);
-      this.endCall(callSession.id);
-    }
-  }
-
-  findCallByAsteriskChannel(channelId) {
-    for (const [callId, session] of this.activeCalls.entries()) {
-      if (session.asteriskChannel === channelId) {
-        return session;
-      }
-    }
-    return null;
-  }
-
-  async handleCallEnd(bye) {
-    const callId = this.extractCallId(bye);
-    if (callId) {
-      await this.endCall(callId);
-    }
-  }
-
-  async endCall(callId) {
-    const callSession = this.activeCalls.get(callId);
-    if (!callSession) return;
-
-    console.log(`Ending call ${callId}`);
-
-    try {
-      // Terminate JsSIP session if it exists
-      if (callSession.sipSession && callSession.sipSession.isEstablished()) {
-        callSession.sipSession.terminate();
-      }
-
-      // Cleanup speech resources
-      if (callSession.speechRecognizer) {
-        callSession.speechRecognizer.stopContinuousRecognitionAsync();
-        callSession.speechRecognizer.close();
-      }
-
-      if (callSession.speechSynthesizer) {
-        callSession.speechSynthesizer.close();
-      }
-
-      // Hangup Asterisk channel
-      if (callSession.asteriskChannel) {
-        await this.makeAsteriskRequest('DELETE', `/channels/${callSession.asteriskChannel}`);
-      }
-
-      // Log conversation summary
-      console.log(`Call ${callId} summary:`, {
-        duration: Date.now() - callSession.startTime,
-        messageCount: callSession.conversationHistory.length,
-        fromNumber: callSession.fromNumber
-      });
-
-    } catch (error) {
-      console.error('Error during call cleanup:', error);
-    } finally {
-      this.activeCalls.delete(callId);
-    }
-  }
-
-  generateCallId() {
-    return `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  }
-
-  extractPhoneNumber(uri) {
-    // Handle both string URIs and JsSIP URI objects
-    if (typeof uri === 'string') {
-      const match = uri.match(/sip:(\+?\d+)@/);
-      return match ? match[1] : 'unknown';
-    } else if (uri && uri.user) {
-      return uri.user;
-    }
-    return 'unknown';
-  }
-
-  extractCallId(msg) {
-    // Extract call ID from SIP message headers or content
-    const callIdHeader = msg.headers['call-id'];
-    return callIdHeader || null;
-  }
-
-  generateSDP() {
-    // Basic SDP for audio call
-    return `v=0
-o=- ${Date.now()} ${Date.now()} IN IP4 ${config.sip.host}
-s=AI Voice Assistant
-c=IN IP4 ${config.sip.host}
-t=0 0
-m=audio 5004 RTP/AVP 0 8
-a=rtpmap:0 PCMU/8000
-a=rtpmap:8 PCMA/8000
-a=sendrecv`;
-  }
-
-  async handleCallAcknowledge(ack) {
-    console.log('Call acknowledged');
-    // Additional setup if needed after ACK
-  }
-
-  start() {
-    return new Promise((resolve) => {
-      this.app.listen(config.port, () => {
-        console.log(`AI Voice Call Router started on port ${config.port}`);
-        console.log('Configuration:');
-        console.log(`- SIP: ${config.sip.host}:${config.sip.port}`);
-        console.log(`- Asterisk: ${config.asterisk.host}:${config.asterisk.port}`);
-        console.log(`- Azure Speech Region: ${config.azure.speechRegion}`);
-        resolve();
-      });
-    });
-  }
-}
-
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('Shutting down gracefully...');
-  
-  // End all active calls
-  const router = global.voiceRouter;
-  if (router) {
-    for (const [callId] of router.activeCalls.entries()) {
-      await router.endCall(callId);
-    }
-  }
-  
-  process.exit(0);
-});
-
-// Error handling
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  process.exit(1);
-});
-
-// Start the application
-async function main() {
-  try {
-    const router = new VoiceCallRouter();
-    global.voiceRouter = router;
-    await router.start();
-    
-    console.log('AI Voice Call Router is ready to handle calls!');
-    console.log('Make sure your OnSIP account is configured to route calls to this server');
-    
-  } catch (error) {
-    console.error('Failed to start application:', error);
+const axios = require('axios');
+require('dotenv').config();
+
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
+const port = process.env.PORT || 3000;
+
+// Middleware
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
+// Configure multer for file uploads
+const upload = multer({ dest: 'uploads/' });
+
+// Environment variables validation
+const requiredEnvVars = [
+  'TWILIO_ACCOUNT_SID',
+  'TWILIO_AUTH_TOKEN',
+  'AZURE_SPEECH_KEY',
+  'AZURE_SPEECH_REGION'
+];
+
+requiredEnvVars.forEach(envVar => {
+  if (!process.env[envVar]) {
+    console.error(`Missing required environment variable: ${envVar}`);
     process.exit(1);
   }
+});
+
+// Initialize Twilio client
+const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+
+// Azure Speech configuration
+const speechConfig = sdk.SpeechConfig.fromSubscription(
+  process.env.AZURE_SPEECH_KEY,
+  process.env.AZURE_SPEECH_REGION
+);
+speechConfig.speechRecognitionLanguage = 'en-US';
+
+// Store active calls and their real-time transcriptions
+const activeCalls = new Map();
+const activeStreams = new Map();
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Twilio Real-Time Voice-to-Text Backend API',
+    endpoints: {
+      '/webhook/voice': 'POST - Twilio voice webhook',
+      '/webhook/recording': 'POST - Twilio recording webhook (fallback)',
+      '/transcribe': 'POST - Direct transcription endpoint',
+      '/call/:callSid/transcript': 'GET - Get call transcript',
+      '/call/:callSid/realtime': 'GET - Get real-time transcript stream',
+      '/ws': 'WebSocket - Real-time transcription updates'
+    }
+  });
+});
+
+// Twilio voice webhook - handles incoming calls with real-time streaming
+app.post('/webhook/voice', (req, res) => {
+  const { CallSid, From, To, CallStatus } = req.body;
+  
+  console.log(`Incoming call: ${CallSid} from ${From} to ${To}, status: ${CallStatus}`);
+  
+  // Initialize call data
+  activeCalls.set(CallSid, {
+    from: From,
+    to: To,
+    startTime: new Date(),
+    transcriptions: [],
+    realtimeTranscript: '',
+    status: CallStatus,
+    isRealTime: true
+  });
+  
+  const twiml = new twilio.twiml.VoiceResponse();
+  
+  // Greet the caller
+  twiml.say('Hello! Your call is being transcribed in real-time. Please speak clearly.');
+  
+  // Start media stream for real-time transcription
+  const start = twiml.start();
+  start.stream({
+    name: 'realtime-transcription',
+    url: `wss://${req.get('host')}/media-stream`
+  });
+  
+  // Keep the call active and listen
+  twiml.say('I\'m listening. Please speak, and I\'ll transcribe what you say in real-time.');
+  
+  // Pause to allow streaming
+  twiml.pause({ length: 30 });
+  
+  // Optional: Also record as backup
+  twiml.record({
+    maxLength: 300,
+    playBeep: false,
+    recordingStatusCallback: '/webhook/recording',
+    recordingStatusCallbackEvent: ['completed']
+  });
+  
+  twiml.say('Thank you for your call.');
+  
+  res.type('text/xml');
+  res.send(twiml.toString());
+});
+
+// WebSocket server for media streams
+wss.on('connection', (ws, req) => {
+  console.log('New WebSocket connection');
+  
+  ws.on('message', async (message) => {
+    try {
+      const msg = JSON.parse(message);
+      
+      switch (msg.event) {
+        case 'start':
+          console.log(`Media stream started: ${msg.start.callSid}`);
+          await handleStreamStart(ws, msg.start);
+          break;
+          
+        case 'media':
+          await handleMediaMessage(ws, msg);
+          break;
+          
+        case 'stop':
+          console.log(`Media stream stopped: ${msg.stop.callSid}`);
+          await handleStreamStop(ws, msg.stop);
+          break;
+          
+        default:
+          console.log('Unknown message type:', msg.event);
+      }
+    } catch (error) {
+      console.error('WebSocket message error:', error);
+    }
+  });
+  
+  ws.on('close', () => {
+    console.log('WebSocket connection closed');
+  });
+});
+
+// Handle stream start
+async function handleStreamStart(ws, startData) {
+  const { callSid } = startData;
+  
+  try {
+    // Create Azure Speech recognizer for real-time processing
+    const audioConfig = sdk.AudioConfig.fromDefaultMicrophoneInput();
+    const recognizer = new sdk.SpeechRecognizer(speechConfig);
+    
+    // Create push audio input stream for Azure Speech
+    const pushStream = sdk.AudioInputStream.createPushStream();
+    const audioConfigFromStream = sdk.AudioConfig.fromStreamInput(pushStream);
+    const streamRecognizer = new sdk.SpeechRecognizer(speechConfig, audioConfigFromStream);
+    
+    // Store stream data
+    activeStreams.set(callSid, {
+      ws,
+      recognizer: streamRecognizer,
+      pushStream,
+      audioBuffer: Buffer.alloc(0),
+      isProcessing: false
+    });
+    
+    // Set up real-time transcription events
+    streamRecognizer.recognizing = (sender, e) => {
+      if (e.result.reason === sdk.ResultReason.RecognizingSpeech) {
+        const partialTranscript = e.result.text;
+        console.log(`RECOGNIZING (${callSid}): ${partialTranscript}`);
+        
+        // Update call data with partial transcript
+        const callData = activeCalls.get(callSid);
+        if (callData) {
+          callData.partialTranscript = partialTranscript;
+        }
+        
+        // Broadcast to WebSocket clients
+        broadcastTranscription(callSid, partialTranscript, 'partial');
+      }
+    };
+    
+    streamRecognizer.recognized = (sender, e) => {
+      if (e.result.reason === sdk.ResultReason.RecognizedSpeech) {
+        const finalTranscript = e.result.text;
+        console.log(`RECOGNIZED (${callSid}): ${finalTranscript}`);
+        
+        // Update call data with final transcript
+        const callData = activeCalls.get(callSid);
+        if (callData) {
+          callData.realtimeTranscript += finalTranscript + ' ';
+          callData.transcriptions.push({
+            transcript: finalTranscript,
+            timestamp: new Date(),
+            type: 'realtime'
+          });
+        }
+        
+        // Broadcast to WebSocket clients
+        broadcastTranscription(callSid, finalTranscript, 'final');
+      }
+    };
+    
+    streamRecognizer.canceled = (sender, e) => {
+      console.log(`CANCELED (${callSid}): Reason=${e.reason}`);
+      if (e.reason === sdk.CancellationReason.Error) {
+        console.log(`CANCELED: ErrorDetails=${e.errorDetails}`);
+      }
+    };
+    
+    // Start continuous recognition
+    streamRecognizer.startContinuousRecognitionAsync(
+      () => {
+        console.log(`Real-time transcription started for call ${callSid}`);
+      },
+      (error) => {
+        console.error(`Failed to start transcription for ${callSid}:`, error);
+      }
+    );
+    
+  } catch (error) {
+    console.error('Error setting up real-time transcription:', error);
+  }
 }
 
-// Export for testing
-module.exports = { VoiceCallRouter, config };
-
-// Run if this file is executed directly
-if (require.main === module) {
-  main();
+// Handle media message (audio data)
+async function handleMediaMessage(ws, msg) {
+  const { media } = msg;
+  const callSid = media.callSid;
+  const streamData = activeStreams.get(callSid);
+  
+  if (!streamData) return;
+  
+  try {
+    // Convert base64 audio to buffer
+    const audioData = Buffer.from(media.payload, 'base64');
+    
+    // Convert mulaw to linear PCM (Azure Speech expects PCM)
+    const pcmData = convertMulawToPcm(audioData);
+    
+    // Push audio data to Azure Speech stream
+    streamData.pushStream.write(pcmData);
+    
+  } catch (error) {
+    console.error('Error processing media message:', error);
+  }
 }
+
+// Handle stream stop
+async function handleStreamStop(ws, stopData) {
+  const { callSid } = stopData;
+  const streamData = activeStreams.get(callSid);
+  
+  if (streamData) {
+    try {
+      // Stop recognition
+      streamData.recognizer.stopContinuousRecognitionAsync();
+      
+      // Close push stream
+      streamData.pushStream.close();
+      
+      // Update call status
+      const callData = activeCalls.get(callSid);
+      if (callData) {
+        callData.status = 'completed';
+        callData.endTime = new Date();
+      }
+      
+      // Clean up
+      activeStreams.delete(callSid);
+      
+      console.log(`Real-time transcription ended for call ${callSid}`);
+    } catch (error) {
+      console.error('Error stopping stream:', error);
+    }
+  }
+}
+
+// Convert mulaw to PCM (simplified conversion)
+function convertMulawToPcm(mulawData) {
+  // This is a simplified mulaw to PCM conversion
+  // For production, use a proper audio conversion library
+  const pcmData = Buffer.alloc(mulawData.length * 2);
+  
+  for (let i = 0; i < mulawData.length; i++) {
+    const mulaw = mulawData[i];
+    const pcm = mulawToPcm(mulaw);
+    pcmData.writeInt16LE(pcm, i * 2);
+  }
+  
+  return pcmData;
+}
+
+// Mulaw to PCM conversion lookup
+function mulawToPcm(mulaw) {
+  const BIAS = 33;
+  const CLIP = 32635;
+  
+  mulaw = ~mulaw;
+  const sign = mulaw & 0x80;
+  const exponent = (mulaw >> 4) & 0x07;
+  const mantissa = mulaw & 0x0F;
+  
+  let sample = (mantissa << 3) + BIAS;
+  sample <<= exponent;
+  
+  if (sign !== 0) sample = -sample;
+  if (sample > CLIP) sample = CLIP;
+  if (sample < -CLIP) sample = -CLIP;
+  
+  return sample;
+}
+
+// Broadcast transcription to WebSocket clients
+function broadcastTranscription(callSid, transcript, type) {
+  const message = JSON.stringify({
+    event: 'transcription',
+    callSid,
+    transcript,
+    type,
+    timestamp: new Date().toISOString()
+  });
+  
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+// Fallback recording webhook (if real-time fails)
+app.post('/webhook/recording', async (req, res) => {
+  const { CallSid, RecordingUrl, RecordingSid, RecordingDuration } = req.body;
+  
+  console.log(`Fallback recording completed for call ${CallSid}: ${RecordingUrl}`);
+  
+  // Only process if real-time transcription wasn't successful
+  const callData = activeCalls.get(CallSid);
+  if (callData && !callData.realtimeTranscript) {
+    try {
+      const audioUrl = `${RecordingUrl}.wav`;
+      const audioResponse = await axios({
+        method: 'GET',
+        url: audioUrl,
+        responseType: 'stream',
+        auth: {
+          username: process.env.TWILIO_ACCOUNT_SID,
+          password: process.env.TWILIO_AUTH_TOKEN
+        }
+      });
+      
+      const audioFilePath = path.join(__dirname, 'uploads', `${RecordingSid}.wav`);
+      const writer = fs.createWriteStream(audioFilePath);
+      audioResponse.data.pipe(writer);
+      
+      writer.on('finish', async () => {
+        try {
+          const transcript = await transcribeAudio(audioFilePath);
+          
+          callData.transcriptions.push({
+            recordingSid: RecordingSid,
+            transcript: transcript,
+            duration: RecordingDuration,
+            timestamp: new Date(),
+            type: 'fallback'
+          });
+          callData.status = 'transcribed';
+          
+          fs.unlinkSync(audioFilePath);
+          
+          console.log(`Fallback transcription completed for ${CallSid}:`, transcript);
+        } catch (error) {
+          console.error('Fallback transcription error:', error);
+        }
+      });
+      
+    } catch (error) {
+      console.error('Error processing fallback recording:', error);
+    }
+  }
+  
+  res.status(200).send('OK');
+});
+
+// Get real-time transcript
+app.get('/call/:callSid/realtime', (req, res) => {
+  const { callSid } = req.params;
+  const callData = activeCalls.get(callSid);
+  
+  if (!callData) {
+    return res.status(404).json({ error: 'Call not found' });
+  }
+  
+  res.json({
+    callSid: callSid,
+    from: callData.from,
+    to: callData.to,
+    startTime: callData.startTime,
+    endTime: callData.endTime,
+    status: callData.status,
+    realtimeTranscript: callData.realtimeTranscript,
+    partialTranscript: callData.partialTranscript,
+    transcriptions: callData.transcriptions.filter(t => t.type === 'realtime')
+  });
+});
+
+// Direct transcription endpoint (unchanged)
+app.post('/transcribe', upload.single('audio'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No audio file provided' });
+  }
+  
+  try {
+    const transcript = await transcribeAudio(req.file.path);
+    fs.unlinkSync(req.file.path);
+    
+    res.json({
+      transcript: transcript,
+      filename: req.file.originalname
+    });
+  } catch (error) {
+    console.error('Transcription error:', error);
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(500).json({ error: 'Transcription failed: ' + error.message });
+  }
+});
+
+// Get call transcript (updated for real-time)
+app.get('/call/:callSid/transcript', (req, res) => {
+  const { callSid } = req.params;
+  const callData = activeCalls.get(callSid);
+  
+  if (!callData) {
+    return res.status(404).json({ error: 'Call not found' });
+  }
+  
+  res.json({
+    callSid: callSid,
+    from: callData.from,
+    to: callData.to,
+    startTime: callData.startTime,
+    endTime: callData.endTime,
+    status: callData.status,
+    isRealTime: callData.isRealTime,
+    realtimeTranscript: callData.realtimeTranscript,
+    transcriptions: callData.transcriptions
+  });
+});
+
+// Get all calls
+app.get('/calls', (req, res) => {
+  const calls = Array.from(activeCalls.entries()).map(([callSid, data]) => ({
+    callSid,
+    ...data
+  }));
+  
+  res.json({ calls });
+});
+
+// WebSocket endpoint for real-time updates
+app.get('/ws', (req, res) => {
+  res.json({
+    message: 'WebSocket endpoint for real-time transcription updates',
+    usage: 'Connect to ws://localhost:3000 to receive real-time transcription events'
+  });
+});
+
+// Azure Speech-to-Text function (for fallback)
+async function transcribeAudio(audioFilePath) {
+  return new Promise((resolve, reject) => {
+    try {
+      const audioConfig = sdk.AudioConfig.fromWavFileInput(fs.readFileSync(audioFilePath));
+      const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
+      
+      let transcript = '';
+      
+      recognizer.recognized = (s, e) => {
+        if (e.result.reason === sdk.ResultReason.RecognizedSpeech) {
+          transcript += e.result.text + ' ';
+        }
+      };
+      
+      recognizer.canceled = (s, e) => {
+        if (e.reason === sdk.CancellationReason.Error) {
+          reject(new Error(`Speech recognition canceled: ${e.errorDetails}`));
+        }
+        recognizer.stopContinuousRecognitionAsync();
+      };
+      
+      recognizer.sessionStopped = (s, e) => {
+        recognizer.stopContinuousRecognitionAsync();
+        resolve(transcript.trim());
+      };
+      
+      recognizer.startContinuousRecognitionAsync();
+      
+      setTimeout(() => {
+        recognizer.stopContinuousRecognitionAsync();
+      }, 30000);
+      
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    activeStreams: activeStreams.size,
+    activeCalls: activeCalls.size
+  });
+});
+
+// Error handling middleware
+app.use((error, req, res, next) => {
+  console.error('Unhandled error:', error);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// Create uploads directory if it doesn't exist
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Start server
+server.listen(port, () => {
+  console.log(`Twilio Real-Time Voice-to-Text Backend running on port ${port}`);
+  console.log(`Voice Webhook URL: http://localhost:${port}/webhook/voice`);
+  console.log(`Media Stream URL: wss://localhost:${port}/media-stream`);
+  console.log(`WebSocket URL: ws://localhost:${port}`);
+  console.log('Required environment variables:');
+  requiredEnvVars.forEach(envVar => {
+    console.log(`  ${envVar}: ${process.env[envVar] ? '✓' : '✗'}`);
+  });
+});
+
+module.exports = { app, server };
