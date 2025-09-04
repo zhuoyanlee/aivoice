@@ -18,10 +18,19 @@ preview_id = "cfc18846866541fd93c42de3cf34abd1"
 binding = "AUDIO_BUCKET"
 bucket_name = "twilio-transcriptions"
 
-# Durable Objects for WebSocket handling
+# Durable Objects for WebSocket handling (defined in this worker)
 [[durable_objects.bindings]]
 name = "WEBSOCKET_HANDLER"
 class_name = "WebSocketHandler"
+
+# Migrations for Durable Objects
+[[migrations]]
+tag = "v1"
+new_classes = ["WebSocketHandler"]
+
+[[rules]]
+type = "ESModule"
+globs = ["**/*.js"]
 
 # Environment-specific configurations
 [env.staging]
