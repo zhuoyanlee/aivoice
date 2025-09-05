@@ -96,21 +96,40 @@ router.post('/webhook/recording', async (request, env) => {
     const callData = callDataStr ? JSON.parse(callDataStr) : null;
     
     if (callData && !callData.realtimeTranscript) {
-      // Download and transcribe audio using Azure Speech API
-      const transcript = await transcribeWithAzureAPI(recordingUrl, env);
-      
-      callData.transcriptions.push({
-        recordingSid,
-        transcript,
-        duration: recordingDuration,
-        timestamp: new Date().toISOString(),
-        type: 'fallback'
+      // Download audio from Twilio and get buffer
+      const audioUrl = `${recordingUrl}.wav`;
+      const audioResponse = await fetch(audioUrl, {
+        headers: {
+          'Authorization': `Basic ${btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)}`
+        }
       });
-      callData.status = 'transcribed';
       
-      await env.TRANSCRIPTIONS.put(`call:${callSid}`, JSON.stringify(callData));
-      
-      console.log(`Fallback transcription completed for ${callSid}:`, transcript);
+      if (audioResponse.ok) {
+        const audioBuffer = await audioResponse.arrayBuffer();
+        
+        // Store in R2 for backup (optional)
+        const fileName = `recording-${recordingSid}.wav`;
+        await env.AUDIO_BUCKET.put(fileName, audioBuffer);
+        
+        // Transcribe using audio buffer
+        const transcript = await transcribeWithAzureAPI(null, env, audioBuffer);
+        
+        callData.transcriptions.push({
+          recordingSid,
+          transcript,
+          duration: recordingDuration,
+          timestamp: new Date().toISOString(),
+          type: 'fallback',
+          audioFile: fileName
+        });
+        callData.status = 'transcribed';
+        
+        await env.TRANSCRIPTIONS.put(`call:${callSid}`, JSON.stringify(callData));
+        
+        console.log(`Fallback transcription completed for ${callSid}:`, transcript);
+      } else {
+        console.error(`Failed to download recording: ${audioResponse.statusText}`);
+      }
     }
   } catch (error) {
     console.error('Error processing fallback recording:', error);
@@ -224,20 +243,27 @@ router.get('/health', () => {
 });
 
 // Azure Speech API transcription function
-async function transcribeWithAzureAPI(audioUrl, env) {
+async function transcribeWithAzureAPI(audioUrl, env, audioBuffer = null) {
   try {
-    // Download audio file
-    const audioResponse = await fetch(audioUrl, {
-      headers: {
-        'Authorization': `Basic ${btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)}`
+    let finalAudioBuffer;
+    
+    if (audioBuffer) {
+      // Audio data already provided (for direct upload)
+      finalAudioBuffer = audioBuffer;
+    } else {
+      // Download audio from URL (for Twilio recordings)
+      const audioResponse = await fetch(audioUrl, {
+        headers: {
+          'Authorization': `Basic ${btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)}`
+        }
+      });
+      
+      if (!audioResponse.ok) {
+        throw new Error('Failed to download audio');
       }
-    });
-    
-    if (!audioResponse.ok) {
-      throw new Error('Failed to download audio');
+      
+      finalAudioBuffer = await audioResponse.arrayBuffer();
     }
-    
-    const audioBuffer = await audioResponse.arrayBuffer();
     
     // Call Azure Speech-to-Text REST API
     const speechEndpoint = `https://${env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US`;
@@ -249,7 +275,7 @@ async function transcribeWithAzureAPI(audioUrl, env) {
         'Content-Type': 'audio/wav',
         'Accept': 'application/json'
       },
-      body: audioBuffer
+      body: finalAudioBuffer
     });
     
     if (!speechResponse.ok) {
