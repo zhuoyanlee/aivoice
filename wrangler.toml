@@ -42,4 +42,4 @@ name = "twilio-voice-transcription-prod"
 vars = { NODE_ENV = "production" }
 
 [observability.logs]
-enabled = false
+enabled = true
