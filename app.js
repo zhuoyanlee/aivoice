@@ -358,7 +358,11 @@ export class WebSocketHandler {
     
     try {
       // Convert base64 mulaw audio to PCM buffer
-      const audioData = Buffer.from(media.payload, 'base64');
+      const audioData = Uint8Array.from(
+        atob(media.payload),
+        c => c.charCodeAt(0)
+      );
+      
       const pcmData = this.convertMulawToPcm(audioData);
       
       // Send to Azure Speech API for real-time transcription
