@@ -344,9 +344,18 @@ export class WebSocketHandler {
 
 
           case 'media':
-            console.log("Sending audio chunk:", message.media.payload.byteLength);
 
             if (azureSocket && azureSocket.readyState === WebSocket.OPEN) {
+              
+              azureSocket.send(JSON.stringify({
+                context: {
+                  system: { version: "1.0.00000" },
+                  os: { platform: "CloudflareWorker" },
+                  audio: { source: "stream" }
+                }
+              }));
+                
+              console.log("Sending audio chunk:", message.media.chunk);
               const audioData = Uint8Array.from(atob(message.media.payload), c => c.charCodeAt(0));
               const pcmData = this.convertMulawToPcm(audioData);
 
@@ -360,7 +369,6 @@ export class WebSocketHandler {
 
           case 'stop':
             console.log(`Call ${callSid} ended.`);
-            azureSocket.send(JSON.stringify({ type: "endOfStream" }));
             if (azureSocket && azureSocket.readyState === WebSocket.OPEN) {
               try {
                 // 🔥 Tell Azure no more audio is coming
@@ -437,7 +445,7 @@ export class WebSocketHandler {
   async getAzureToken() {
     console.log(`speech region: ${this.env.AZURE_SPEECH_REGION}`);
     console.log(`speech key: ${this.env.AZURE_SPEECH_KEY}`);
-    
+
     const resp = await fetch(`https://${this.env.AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/sts/v1.0/issueToken`, {
       method: 'POST',
       headers: {
