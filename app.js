@@ -436,6 +436,8 @@ export class WebSocketHandler {
     const resp = await fetch(`https://${this.env.AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/sts/v1.0/issueToken`, {
       method: 'POST',
       headers: {
+        "Content-type": "application/x-www-form-urlencoded",
+        "Content-length": 0, 
         "Ocp-Apim-Subscription-Key": this.env.AZURE_SPEECH_KEY
       }
     });
