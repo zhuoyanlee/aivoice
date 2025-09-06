@@ -50,7 +50,7 @@ router.post('/webhook/voice', async (request, env) => {
   // TwiML response with Media Stream
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say>Welcome to Fong's Kitchen, please place your order now.</Say>
+    <Say>Hello! Your call is being transcribed in real-time. Please speak clearly.</Say>
     <Start>
         <Stream name="realtime-transcription" url="${wsUrl}" />
     </Start>
@@ -379,22 +379,25 @@ export class WebSocketHandler {
     }
   }
 
-  // Convert mulaw to PCM for Azure Speech
+  // Convert mulaw to PCM for Azure Speech (Workers-compatible)
   convertMulawToPcm(mulawData) {
     const pcmData = new Int16Array(mulawData.length);
     
     for (let i = 0; i < mulawData.length; i++) {
       const mulaw = mulawData[i];
-      // Simplified mulaw to PCM conversion
+      
+      // Mulaw to linear PCM conversion
       const sign = (mulaw & 0x80) !== 0;
       const exponent = (mulaw >> 4) & 0x07;
       const mantissa = mulaw & 0x0F;
       
-      let sample = (mantissa << 3) + 33;
-      sample <<= exponent;
+      let sample = ((mantissa << 3) + 33) << exponent;
       
       if (sign) sample = -sample;
-      pcmData[i] = Math.max(-32768, Math.min(32767, sample));
+      
+      // Clamp to 16-bit range
+      sample = Math.max(-32768, Math.min(32767, sample));
+      pcmData[i] = sample;
     }
     
     return pcmData.buffer;
