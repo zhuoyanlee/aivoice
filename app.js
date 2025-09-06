@@ -50,13 +50,13 @@ router.post('/webhook/voice', async (request, env) => {
   // TwiML response with Media Stream
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say>Hello! Your call is being transcribed in real-time. Please speak clearly.</Say>
+    <Say>Hello! This is Fong's Kitchen</Say>
     <Start>
         <Stream name="realtime-transcription" url="${wsUrl}" />
     </Start>
     <Say>I'm listening. Please speak, and I'll transcribe what you say in real-time.</Say>
-    <Pause length="30" />
-    <Record maxLength="300" playBeep="false" recordingStatusCallback="/webhook/recording" recordingStatusCallbackEvent="completed" />
+    <Pause length="10" />
+    <Record maxLength="100" playBeep="false" recordingStatusCallback="/webhook/recording" recordingStatusCallbackEvent="completed" />
     <Say>Thank you for your call.</Say>
 </Response>`;
 
@@ -329,6 +329,8 @@ export class WebSocketHandler {
 
     webSocket.addEventListener('message', async (event) => {
       try {
+        console.log(`event.data: ${event.data}`);
+
         const message = JSON.parse(event.data);
 
         switch (message.event) {
@@ -433,6 +435,9 @@ export class WebSocketHandler {
     return pcmData.buffer;
   }
   async getAzureToken() {
+    console.log(`speech region: ${this.env.AZURE_SPEECH_REGION}`);
+    console.log(`speech key: ${this.env.AZURE_SPEECH_KEY}`);
+    
     const resp = await fetch(`https://${this.env.AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/sts/v1.0/issueToken`, {
       method: 'POST',
       headers: {
@@ -445,12 +450,13 @@ export class WebSocketHandler {
     if (!resp.ok) {
       throw new Error(`Azure token request failed: ${resp.status}`);
     }
-
     return await resp.text(); // JWT token string
   }
 
   async connectAzureWebSocket(callSid) {
     const token = await this.getAzureToken();
+
+    console.log(`obtained azure token: ${token}`);
 
     const url = `wss://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed&authorization=Bearer%20${encodeURIComponent(token)}`;
 
