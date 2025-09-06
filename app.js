@@ -354,13 +354,25 @@ export class WebSocketHandler {
             }
             break;
 
-          case 'stop':
-            console.log(`Media stream stopped: ${callSid}`);
-            if (azureSocket) {
-              azureSocket.close(1000, "end of stream");
-              azureSocket = null;
-            }
-            break;
+            case 'stop':
+              console.log(`Call ${callSid} ended.`);
+            
+              if (azureSocket && azureSocket.readyState === WebSocket.OPEN) {
+                try {
+                  // 🔥 Tell Azure no more audio is coming
+                  azureSocket.send(JSON.stringify({ type: "endOfStream" }));
+            
+                  // Give Azure a short moment to respond with the last transcript
+                  setTimeout(() => {
+                    azureSocket.close();
+                  }, 1000);
+                } catch (err) {
+                  console.error("Error sending endOfStream:", err);
+                  azureSocket.close();
+                }
+              }
+              break;
+            
         }
       } catch (error) {
         console.error('WebSocket message error:', error);
@@ -442,6 +454,10 @@ export class WebSocketHandler {
           this.broadcastTranscription(callSid, transcript, 'realtime');
 
           console.log(`Azure transcript [${callSid}]: ${transcript}`);
+        }
+        if (data.type === "speech.hypothesis" || data.type === "speech.phrase") {
+          console.log("Transcript:", data.text);
+      
         }
       } catch (err) {
         console.error("Azure WebSocket message error:", err);
