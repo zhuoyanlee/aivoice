@@ -24,12 +24,6 @@ bucket_name = "twilio-transcriptions"
 name = "WEBSOCKET_HANDLER"
 class_name = "WebSocketHandler"
 
-# Define the Durable Object
-[[durable_objects.bindings]]
-name = "WEBSOCKET_HANDLER"
-class_name = "WebSocketHandler"
-script_name = "twilio-voice-transcription"
-
 # Migrations for Durable Objects
 [[migrations]]
 tag = "v1"
