@@ -40,3 +40,6 @@ vars = { NODE_ENV = "staging" }
 [env.production]
 name = "twilio-voice-transcription-prod"
 vars = { NODE_ENV = "production" }
+
+[observability.logs]
+enabled = false
