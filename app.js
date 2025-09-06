@@ -50,7 +50,7 @@ router.post('/webhook/voice', async (request, env) => {
   // TwiML response with Media Stream
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say>Hello! Your call is being transcribed in real-time. Please speak clearly.</Say>
+    <Say>Welcome to Fong's Kitchen, please place your order now.</Say>
     <Start>
         <Stream name="realtime-transcription" url="${wsUrl}" />
     </Start>
@@ -356,17 +356,133 @@ export class WebSocketHandler {
     const { media } = message;
     const callSid = media.callSid;
     
-    // In a real implementation, you would:
-    // 1. Convert mulaw audio to PCM
-    // 2. Send to Azure Speech API for real-time transcription
-    // 3. Broadcast results to connected clients
+    try {
+      // Convert base64 mulaw audio to PCM buffer
+      const audioData = Buffer.from(media.payload, 'base64');
+      const pcmData = this.convertMulawToPcm(audioData);
+      
+      // Send to Azure Speech API for real-time transcription
+      const transcript = await this.transcribeRealTime(pcmData, callSid);
+      
+      if (transcript) {
+        // Store in KV
+        await this.updateCallTranscript(callSid, transcript);
+        
+        // Broadcast to connected clients
+        this.broadcastTranscription(callSid, transcript, 'realtime');
+        
+        console.log(`Real-time transcript for ${callSid}: ${transcript}`);
+      }
+      
+    } catch (error) {
+      console.error('Error processing real-time audio:', error);
+    }
+  }
+
+  // Convert mulaw to PCM for Azure Speech
+  convertMulawToPcm(mulawData) {
+    const pcmData = new Int16Array(mulawData.length);
     
-    // For now, just log the audio data received
-    console.log(`Received audio data for call ${callSid}, payload length: ${media.payload.length}`);
+    for (let i = 0; i < mulawData.length; i++) {
+      const mulaw = mulawData[i];
+      // Simplified mulaw to PCM conversion
+      const sign = (mulaw & 0x80) !== 0;
+      const exponent = (mulaw >> 4) & 0x07;
+      const mantissa = mulaw & 0x0F;
+      
+      let sample = (mantissa << 3) + 33;
+      sample <<= exponent;
+      
+      if (sign) sample = -sample;
+      pcmData[i] = Math.max(-32768, Math.min(32767, sample));
+    }
     
-    // Simulate transcription result
-    const mockTranscript = "Real-time transcription would appear here";
-    this.broadcastTranscription(callSid, mockTranscript, 'partial');
+    return pcmData.buffer;
+  }
+
+  // Real-time transcription using Azure Speech API
+  async transcribeRealTime(pcmBuffer, callSid) {
+    try {
+      const speechEndpoint = `https://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=simple`;
+      
+      const response = await fetch(speechEndpoint, {
+        method: 'POST',
+        headers: {
+          'Ocp-Apim-Subscription-Key': this.env.AZURE_SPEECH_KEY,
+          'Content-Type': 'audio/wav',
+          'Accept': 'application/json'
+        },
+        body: this.createWavBuffer(pcmBuffer)
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        return result.DisplayText || '';
+      }
+      
+    } catch (error) {
+      console.error('Azure real-time transcription error:', error);
+    }
+    
+    return null;
+  }
+
+  // Create WAV buffer for Azure Speech API
+  createWavBuffer(pcmBuffer) {
+    const sampleRate = 8000; // Twilio uses 8kHz
+    const channels = 1;
+    const bitsPerSample = 16;
+    
+    const wavHeader = new ArrayBuffer(44);
+    const view = new DataView(wavHeader);
+    
+    // WAV header
+    const writeString = (offset, string) => {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    };
+    
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + pcmBuffer.byteLength, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, channels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * channels * (bitsPerSample / 8), true);
+    view.setUint16(32, channels * (bitsPerSample / 8), true);
+    view.setUint16(34, bitsPerSample, true);
+    writeString(36, 'data');
+    view.setUint32(40, pcmBuffer.byteLength, true);
+    
+    // Combine header and PCM data
+    const wavBuffer = new ArrayBuffer(wavHeader.byteLength + pcmBuffer.byteLength);
+    new Uint8Array(wavBuffer).set(new Uint8Array(wavHeader));
+    new Uint8Array(wavBuffer).set(new Uint8Array(pcmBuffer), wavHeader.byteLength);
+    
+    return wavBuffer;
+  }
+
+  // Update call transcript in KV storage
+  async updateCallTranscript(callSid, transcript) {
+    try {
+      const callDataStr = await this.env.TRANSCRIPTIONS.get(`call:${callSid}`);
+      if (callDataStr) {
+        const callData = JSON.parse(callDataStr);
+        callData.realtimeTranscript += transcript + ' ';
+        callData.transcriptions.push({
+          transcript,
+          timestamp: new Date().toISOString(),
+          type: 'realtime'
+        });
+        
+        await this.env.TRANSCRIPTIONS.put(`call:${callSid}`, JSON.stringify(callData));
+      }
+    } catch (error) {
+      console.error('Error updating call transcript:', error);
+    }
   }
 
   broadcastTranscription(callSid, transcript, type) {
