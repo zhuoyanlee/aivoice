@@ -19,11 +19,9 @@ binding = "AUDIO_BUCKET"
 bucket_name = "twilio-transcriptions"
 
 # Durable Objects for WebSocket handling (defined in this worker)
-[[durable_objects]]
-bindings = [
-  { name = "CALL_SESSION", class_name = "CallSession" },
-  { name = "WEBSOCKET_HANDLER", class_name = "WebSocketHandler" }
-]
+[[durable_objects.bindings]]
+name = "WEBSOCKET_HANDLER"
+class_name = "WebSocketHandler"
 
 # Migrations for Durable Objects
 [[migrations]]
