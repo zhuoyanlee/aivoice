@@ -356,25 +356,25 @@ export class WebSocketHandler {
             }
             break;
 
-            case 'stop':
-              console.log(`Call ${callSid} ended.`);
-              azureSocket.send(JSON.stringify({ type: "endOfStream" }));
-              if (azureSocket && azureSocket.readyState === WebSocket.OPEN) {
-                try {
-                  // 🔥 Tell Azure no more audio is coming
-                  azureSocket.send(JSON.stringify({ type: "endOfStream" }));
-            
-                  // Give Azure a short moment to respond with the last transcript
-                  setTimeout(() => {
-                    azureSocket.close();
-                  }, 1000);
-                } catch (err) {
-                  console.error("Error sending endOfStream:", err);
+          case 'stop':
+            console.log(`Call ${callSid} ended.`);
+            azureSocket.send(JSON.stringify({ type: "endOfStream" }));
+            if (azureSocket && azureSocket.readyState === WebSocket.OPEN) {
+              try {
+                // 🔥 Tell Azure no more audio is coming
+                azureSocket.send(JSON.stringify({ type: "endOfStream" }));
+
+                // Give Azure a short moment to respond with the last transcript
+                setTimeout(() => {
                   azureSocket.close();
-                }
+                }, 1000);
+              } catch (err) {
+                console.error("Error sending endOfStream:", err);
+                azureSocket.close();
               }
-              break;
-            
+            }
+            break;
+
         }
       } catch (error) {
         console.error('WebSocket message error:', error);
@@ -432,34 +432,47 @@ export class WebSocketHandler {
 
     return pcmData.buffer;
   }
-  async connectAzureWebSocket(callSid) {
-    const url = `wss://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed`;
-
-    const ws = new WebSocket(url, [], {
+  async getAzureToken() {
+    const resp = await fetch(`https://${this.env.AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/sts/v1.0/issueToken`, {
+      method: 'POST',
       headers: {
-        'Ocp-Apim-Subscription-Key': this.env.AZURE_SPEECH_KEY
+        "Ocp-Apim-Subscription-Key": this.env.AZURE_SPEECH_KEY
       }
     });
 
+    if (!resp.ok) {
+      throw new Error(`Azure token request failed: ${resp.status}`);
+    }
+
+    return await resp.text(); // JWT token string
+  }
+
+  async connectAzureWebSocket(callSid) {
+    const token = await this.getAzureToken();
+
+    const url = `wss://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed&authorization=Bearer%20${encodeURIComponent(token)}`;
+
+    const ws = new WebSocket(url);
+
     ws.addEventListener('open', () => {
-      console.log(`Azure WebSocket connected for call ${callSid}`);
+      console.log(`Azure WebSocket connected for call ${ callSid }`);
     });
 
     ws.addEventListener('message', async (event) => {
       try {
         const data = JSON.parse(event.data);
-console.log(`data: ${data}`);
+        console.log(`data: ${ data } `);
         if (data.RecognitionStatus === "Success" && data.DisplayText) {
           const transcript = data.DisplayText;
 
           await this.updateCallTranscript(callSid, transcript);
           this.broadcastTranscription(callSid, transcript, 'realtime');
 
-          console.log(`Azure transcript [${callSid}]: ${transcript}`);
+          console.log(`Azure transcript[${ callSid }]: ${ transcript } `);
         }
         if (data.type === "speech.hypothesis" || data.type === "speech.phrase") {
           console.log("Transcript:", data.text);
-      
+
         }
       } catch (err) {
         console.error("Azure WebSocket message error:", err);
@@ -467,11 +480,11 @@ console.log(`data: ${data}`);
     });
 
     ws.addEventListener('close', () => {
-      console.log(`Azure WebSocket closed for call ${callSid}`);
+      console.log(`Azure WebSocket closed for call ${ callSid }`);
     });
 
     ws.addEventListener('error', (err) => {
-      console.error(`Azure WebSocket error for ${callSid}:`, err);
+      console.error(`Azure WebSocket error for ${ callSid }: `, err);
     });
 
     return ws;
@@ -482,109 +495,109 @@ console.log(`data: ${data}`);
     try {
       const speechEndpoint = `https://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=simple`;
 
-      const response = await fetch(speechEndpoint, {
-        method: 'POST',
-        headers: {
-          'Ocp-Apim-Subscription-Key': this.env.AZURE_SPEECH_KEY,
-          'Content-Type': 'audio/wav',
-          'Accept': 'application/json'
-        },
-        body: this.createWavBuffer(pcmBuffer)
-      });
+    const response = await fetch(speechEndpoint, {
+      method: 'POST',
+      headers: {
+        'Ocp-Apim-Subscription-Key': this.env.AZURE_SPEECH_KEY,
+        'Content-Type': 'audio/wav',
+        'Accept': 'application/json'
+      },
+      body: this.createWavBuffer(pcmBuffer)
+    });
 
-      if (response.ok) {
-        const result = await response.json();
-        return result.DisplayText || '';
-      }
-
-    } catch (error) {
-      console.error('Azure real-time transcription error:', error);
+    if (response.ok) {
+      const result = await response.json();
+      return result.DisplayText || '';
     }
+
+  } catch(error) {
+    console.error('Azure real-time transcription error:', error);
+  }
 
     return null;
   }
 
-  // Create WAV buffer for Azure Speech API
-  // Create WAV buffer for Azure Speech API (streaming mode)
-  createWavBuffer(pcmBuffer, includeHeader = false) {
-    const sampleRate = 8000; // Twilio uses 8kHz
-    const channels = 1;
-    const bitsPerSample = 16;
+// Create WAV buffer for Azure Speech API
+// Create WAV buffer for Azure Speech API (streaming mode)
+createWavBuffer(pcmBuffer, includeHeader = false) {
+  const sampleRate = 8000; // Twilio uses 8kHz
+  const channels = 1;
+  const bitsPerSample = 16;
 
-    if (!includeHeader) {
-      // Subsequent chunks → just raw PCM
-      return pcmBuffer;
-    }
-
-    // First chunk → include WAV header
-    const wavHeader = new ArrayBuffer(44);
-    const view = new DataView(wavHeader);
-
-    const writeString = (offset, string) => {
-      for (let i = 0; i < string.length; i++) {
-        view.setUint8(offset + i, string.charCodeAt(i));
-      }
-    };
-
-    writeString(0, 'RIFF');
-    view.setUint32(4, 36 + pcmBuffer.byteLength, true);
-    writeString(8, 'WAVE');
-    writeString(12, 'fmt ');
-    view.setUint32(16, 16, true); // Subchunk1 size
-    view.setUint16(20, 1, true);  // PCM
-    view.setUint16(22, channels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * channels * (bitsPerSample / 8), true);
-    view.setUint16(32, channels * (bitsPerSample / 8), true);
-    view.setUint16(34, bitsPerSample, true);
-    writeString(36, 'data');
-    view.setUint32(40, pcmBuffer.byteLength, true);
-
-    const wavBuffer = new ArrayBuffer(wavHeader.byteLength + pcmBuffer.byteLength);
-    new Uint8Array(wavBuffer).set(new Uint8Array(wavHeader), 0);
-    new Uint8Array(wavBuffer).set(new Uint8Array(pcmBuffer), wavHeader.byteLength);
-
-    return wavBuffer;
+  if (!includeHeader) {
+    // Subsequent chunks → just raw PCM
+    return pcmBuffer;
   }
+
+  // First chunk → include WAV header
+  const wavHeader = new ArrayBuffer(44);
+  const view = new DataView(wavHeader);
+
+  const writeString = (offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  };
+
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + pcmBuffer.byteLength, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true); // Subchunk1 size
+  view.setUint16(20, 1, true);  // PCM
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * (bitsPerSample / 8), true);
+  view.setUint16(32, channels * (bitsPerSample / 8), true);
+  view.setUint16(34, bitsPerSample, true);
+  writeString(36, 'data');
+  view.setUint32(40, pcmBuffer.byteLength, true);
+
+  const wavBuffer = new ArrayBuffer(wavHeader.byteLength + pcmBuffer.byteLength);
+  new Uint8Array(wavBuffer).set(new Uint8Array(wavHeader), 0);
+  new Uint8Array(wavBuffer).set(new Uint8Array(pcmBuffer), wavHeader.byteLength);
+
+  return wavBuffer;
+}
 
 
   // Update call transcript in KV storage
   async updateCallTranscript(callSid, transcript) {
-    try {
-      const callDataStr = await this.env.TRANSCRIPTIONS.get(`call:${callSid}`);
-      if (callDataStr) {
-        const callData = JSON.parse(callDataStr);
-        callData.realtimeTranscript += transcript + ' ';
-        callData.transcriptions.push({
-          transcript,
-          timestamp: new Date().toISOString(),
-          type: 'realtime'
-        });
+  try {
+    const callDataStr = await this.env.TRANSCRIPTIONS.get(`call:${callSid}`);
+    if (callDataStr) {
+      const callData = JSON.parse(callDataStr);
+      callData.realtimeTranscript += transcript + ' ';
+      callData.transcriptions.push({
+        transcript,
+        timestamp: new Date().toISOString(),
+        type: 'realtime'
+      });
 
-        await this.env.TRANSCRIPTIONS.put(`call:${callSid}`, JSON.stringify(callData));
-      }
-    } catch (error) {
-      console.error('Error updating call transcript:', error);
+      await this.env.TRANSCRIPTIONS.put(`call:${callSid}`, JSON.stringify(callData));
     }
+  } catch (error) {
+    console.error('Error updating call transcript:', error);
   }
+}
 
-  broadcastTranscription(callSid, transcript, type) {
-    const message = JSON.stringify({
-      event: 'transcription',
-      callSid,
-      transcript,
-      type,
-      timestamp: new Date().toISOString()
-    });
+broadcastTranscription(callSid, transcript, type) {
+  const message = JSON.stringify({
+    event: 'transcription',
+    callSid,
+    transcript,
+    type,
+    timestamp: new Date().toISOString()
+  });
 
-    this.sessions.forEach(session => {
-      try {
-        session.send(message);
-      } catch (error) {
-        console.error('Error broadcasting to session:', error);
-      }
-    });
-  }
+  this.sessions.forEach(session => {
+    try {
+      session.send(message);
+    } catch (error) {
+      console.error('Error broadcasting to session:', error);
+    }
+  });
+}
 }
 
 // Main fetch handler
