@@ -342,6 +342,8 @@ export class WebSocketHandler {
 
 
           case 'media':
+            console.log("Sending audio chunk:", message.media.payload.byteLength);
+
             if (azureSocket && azureSocket.readyState === WebSocket.OPEN) {
               const audioData = Uint8Array.from(atob(message.media.payload), c => c.charCodeAt(0));
               const pcmData = this.convertMulawToPcm(audioData);
@@ -356,7 +358,7 @@ export class WebSocketHandler {
 
             case 'stop':
               console.log(`Call ${callSid} ended.`);
-            
+              azureSocket.send(JSON.stringify({ type: "endOfStream" }));
               if (azureSocket && azureSocket.readyState === WebSocket.OPEN) {
                 try {
                   // 🔥 Tell Azure no more audio is coming
@@ -446,7 +448,7 @@ export class WebSocketHandler {
     ws.addEventListener('message', async (event) => {
       try {
         const data = JSON.parse(event.data);
-
+console.log(`data: ${data}`);
         if (data.RecognitionStatus === "Success" && data.DisplayText) {
           const transcript = data.DisplayText;
 
