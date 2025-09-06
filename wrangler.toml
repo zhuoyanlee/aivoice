@@ -6,6 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 # Environment variables (don't put secrets here)
 [vars]
 NODE_ENV = "production"
+AZURE_SPEECH_REGION = "australiaeast"
 
 # KV Namespace for storing transcriptions
 [[kv_namespaces]]

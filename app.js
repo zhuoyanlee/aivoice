@@ -329,8 +329,6 @@ export class WebSocketHandler {
 
     webSocket.addEventListener('message', async (event) => {
       try {
-        console.log(`event.data: ${event.data}`);
-
         const message = JSON.parse(event.data);
 
         switch (message.event) {
@@ -477,10 +475,12 @@ export class WebSocketHandler {
     ws.addEventListener('message', async (event) => {
       try {
         const data = JSON.parse(event.data);
-        console.log(`data: ${ data } `);
+        console.log(`azure message: ${ data } `);
         if (data.RecognitionStatus === "Success" && data.DisplayText) {
           const transcript = data.DisplayText;
 
+          console.log(`transcribing: ${transcript}`);
+          
           await this.updateCallTranscript(callSid, transcript);
           this.broadcastTranscription(callSid, transcript, 'realtime');
 
