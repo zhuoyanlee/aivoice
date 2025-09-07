@@ -344,15 +344,7 @@ export class WebSocketHandler {
           case 'media':
 
             if (azureSocket && azureSocket.readyState === WebSocket.OPEN) {
-              
-              azureSocket.send(JSON.stringify({
-                context: {
-                  system: { version: "1.0.00000" },
-                  os: { platform: "CloudflareWorker" },
-                  audio: { source: "stream" }
-                }
-              }));
-                
+                              
               console.log("Sending audio chunk:", message.media.chunk);
               const audioData = Uint8Array.from(atob(message.media.payload), c => c.charCodeAt(0));
               const pcmData = this.convertMulawToPcm(audioData);
@@ -470,6 +462,15 @@ export class WebSocketHandler {
 
     ws.addEventListener('open', () => {
       console.log(`Azure WebSocket connected for call ${ callSid }`);
+
+      
+      ws.send(JSON.stringify({
+        context: {
+          system: { version: "1.0.00000" },
+          os: { platform: "CloudflareWorker" },
+          audio: { source: "stream" }
+        }
+      }));
     });
 
     ws.addEventListener('message', async (event) => {
