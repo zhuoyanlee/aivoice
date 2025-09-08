@@ -304,6 +304,7 @@ class WebSocketHandler {
     this.pushStreams = new Map();
     this.recognizers = new Map();
     this.audioBuffers = new Map(); // Buffer for accumulating audio chunks
+    this.chunkTimestamps = new Map(); // Track chunk delivery times
   }
 
   async fetch(request) {
@@ -339,13 +340,15 @@ class WebSocketHandler {
     webSocket.addEventListener('message', async (event) => {
       try {
         const message = JSON.parse(event.data);
-        console.log('Twilio event:', message.event);
+        const now = new Date().toISOString();
+        console.log(`Twilio event at ${now}:`, message.event);
 
         switch (message.event) {
           case 'start':
             callSid = message.start.callSid;
             isFirstChunk = true;
-            this.audioBuffers.set(callSid, []); // Initialize buffer for this call
+            this.audioBuffers.set(callSid, []);
+            this.chunkTimestamps.set(callSid, []);
             console.log(`Media stream started: ${callSid}`);
 
             try {
@@ -363,26 +366,36 @@ class WebSocketHandler {
           case 'media':
             if (recognizer && pushStream) {
               try {
-                console.log(`Processing media chunk ${message.media.chunk} for ${callSid}`);
-                
                 const audioData = Uint8Array.from(atob(message.media.payload), c => c.charCodeAt(0));
                 const pcmData = this.convertMulawToPcm(audioData);
-                const wavChunk = this.createWavBuffer(pcmData, isFirstChunk);
-                
-                // Debug: Log first few PCM samples
-                const debugSamples = new Int16Array(pcmData).slice(0, 5);
-                console.log(`PCM samples: [${Array.from(debugSamples)}]`);
-                
-                // Buffer the audio data
+                const chunkTimestamp = new Date().toISOString();
+                this.chunkTimestamps.get(callSid).push(chunkTimestamp);
+
+                // Buffer chunks (e.g., accumulate 200ms = 10 chunks at 20ms each)
                 const buffer = this.audioBuffers.get(callSid);
-                buffer.push(new Uint8Array(wavChunk));
+                buffer.push(pcmData); // Store raw PCM
                 this.audioBuffers.set(callSid, buffer);
 
-                // Push to recognizer
-                pushStream.write(new Uint8Array(wavChunk));
-                console.log(`Pushed ${wavChunk.byteLength} bytes to Azure recognizer`);
-                
-                isFirstChunk = false;
+                console.log(`Received chunk ${message.media.chunk} at ${chunkTimestamp}, size: ${pcmData.byteLength} bytes`);
+
+                // Flush buffer when it reaches 200ms or on stop
+                if (buffer.length >= 10 || message.media.chunk === undefined) { // undefined chunk on stop
+                  const concatenatedBuffer = this.concatenateBuffers(buffer);
+                  if (isFirstChunk) {
+                    const wavChunk = this.createWavBuffer(concatenatedBuffer, true);
+                    pushStream.write(new Uint8Array(wavChunk));
+                    console.log(`Pushed first chunk with WAV header: ${wavChunk.byteLength} bytes`);
+                  } else {
+                    pushStream.write(new Uint8Array(concatenatedBuffer));
+                    console.log(`Pushed raw PCM: ${concatenatedBuffer.byteLength} bytes`);
+                  }
+                  this.audioBuffers.set(callSid, []); // Clear buffer after flush
+                  isFirstChunk = false;
+                }
+
+                // Debug: Log first few PCM samples
+                const debugSamples = new Int16Array(pcmData).slice(0, 5);
+                console.log(`PCM samples for chunk ${message.media.chunk}: [${Array.from(debugSamples)}]`);
               } catch (error) {
                 console.error(`Error processing media: ${error.message}`);
               }
@@ -392,17 +405,18 @@ class WebSocketHandler {
             break;
 
           case 'stop':
-            console.log(`Call ${callSid} ended`);
+            console.log(`Call ${callSid} ended at ${new Date().toISOString()}`);
             if (recognizer) {
-              // Flush remaining buffer
+              // Flush any remaining buffered data
               const buffer = this.audioBuffers.get(callSid);
-              if (buffer && buffer.length > 0) {
-                const finalChunk = this.concatenateBuffers(buffer);
-                pushStream.write(finalChunk);
-                console.log(`Flushed ${finalChunk.byteLength} bytes to Azure recognizer`);
+              if (buffer.length > 0) {
+                const finalBuffer = this.concatenateBuffers(buffer);
+                pushStream.write(new Uint8Array(finalBuffer));
+                console.log(`Flushed final buffer: ${finalBuffer.byteLength} bytes`);
               }
               await this.cleanupRecognizer(callSid);
               this.audioBuffers.delete(callSid);
+              this.chunkTimestamps.delete(callSid);
             }
             break;
         }
@@ -412,25 +426,27 @@ class WebSocketHandler {
     });
 
     webSocket.addEventListener('close', () => {
-      console.log(`Twilio WebSocket closed for ${callSid}`);
+      console.log(`Twilio WebSocket closed for ${callSid} at ${new Date().toISOString()}`);
       this.sessions.delete(webSocket);
       if (callSid && this.recognizers.has(callSid)) {
         this.cleanupRecognizer(callSid).catch(err => console.error('Cleanup error:', err));
         this.audioBuffers.delete(callSid);
+        this.chunkTimestamps.delete(callSid);
       }
     });
   }
 
   async setupAzureRecognizer(callSid) {
     try {
-      console.log(`Setting up Azure recognizer for ${callSid}`);
+      console.log(`Setting up Azure recognizer for ${callSid} at ${new Date().toISOString()}`);
       
       const speechConfig = speechSdk.SpeechConfig.fromSubscription(this.env.AZURE_SPEECH_KEY, this.env.AZURE_SPEECH_REGION);
       speechConfig.speechRecognitionLanguage = 'en-US';
-      speechConfig.setProperty(speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, "5000"); // Increased timeout
-      speechConfig.setProperty(speechSdk.PropertyId.Speech_InitialSilenceTimeoutMs, "2000");
-      speechConfig.setProperty(speechSdk.PropertyId.Speech_EndSilenceTimeoutMs, "2000");
-      speechConfig.setProperty(speechSdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, "2000");
+      speechConfig.setProperty(speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, "10000"); // Increased to 10s
+      speechConfig.setProperty(speechSdk.PropertyId.Speech_InitialSilenceTimeoutMs, "3000");
+      speechConfig.setProperty(speechSdk.PropertyId.Speech_EndSilenceTimeoutMs, "3000");
+      speechConfig.setProperty(speechSdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, "3000");
+      speechConfig.setProperty(speechSdk.PropertyId.Speech_AudioFormat, "Raw16Khz16BitMonoPcm"); // Explicitly set format
 
       const pushStream = speechSdk.AudioInputStream.createPushStream();
       const audioConfig = speechSdk.AudioConfig.fromStreamInput(pushStream);
@@ -439,35 +455,35 @@ class WebSocketHandler {
       recognizer.recognized = async (s, e) => {
         if (e.result.reason === speechSdk.ResultReason.RecognizedSpeech) {
           const transcript = e.result.text;
-          console.log(`SUCCESS: Transcript received: "${transcript}"`);
+          console.log(`SUCCESS: Transcript received at ${new Date().toISOString()}: "${transcript}"`);
           
           await this.updateCallTranscript(callSid, transcript);
           this.broadcastTranscription(callSid, transcript, 'realtime');
         } else if (e.result.reason === speechSdk.ResultReason.NoMatch) {
-          console.warn(`No speech detected: ${e.result.reason}, Duration: ${e.result.duration}`);
+          console.warn(`No speech detected at ${new Date().toISOString()}: ${e.result.reason}, Duration: ${e.result.duration}`);
         }
       };
 
       recognizer.intermediateResult = (s, e) => {
         if (e.result.reason === speechSdk.ResultReason.IntermediateRecognizedSpeech) {
-          console.log(`Intermediate result: "${e.result.text}"`);
+          console.log(`Intermediate result at ${new Date().toISOString()}: "${e.result.text}"`);
         }
       };
 
       recognizer.canceled = (s, e) => {
-        console.error(`Recognition canceled: ${e.errorDetails}`);
+        console.error(`Recognition canceled at ${new Date().toISOString()}: ${e.errorDetails}`);
       };
 
       recognizer.sessionStopped = () => {
-        console.log(`Recognition session stopped for ${callSid}`);
+        console.log(`Recognition session stopped for ${callSid} at ${new Date().toISOString()}`);
       };
 
       await recognizer.startContinuousRecognitionAsync();
-      console.log(`Started continuous recognition for ${callSid}`);
+      console.log(`Started continuous recognition for ${callSid} at ${new Date().toISOString()}`);
 
       return { recognizer, pushStream };
     } catch (error) {
-      console.error(`Error in setupAzureRecognizer:`, error);
+      console.error(`Error in setupAzureRecognizer at ${new Date().toISOString()}:`, error);
       throw error;
     }
   }
@@ -481,9 +497,9 @@ class WebSocketHandler {
         await recognizer.stopContinuousRecognitionAsync();
         recognizer.close();
         this.recognizers.delete(callSid);
-        console.log(`Recognizer cleaned up for ${callSid}`);
+        console.log(`Recognizer cleaned up for ${callSid} at ${new Date().toISOString()}`);
       } catch (error) {
-        console.error(`Error stopping recognizer: ${error.message}`);
+        console.error(`Error stopping recognizer at ${new Date().toISOString()}: ${error.message}`);
       }
     }
 
@@ -491,9 +507,9 @@ class WebSocketHandler {
       try {
         pushStream.close();
         this.pushStreams.delete(callSid);
-        console.log(`Push stream cleaned up for ${callSid}`);
+        console.log(`Push stream cleaned up for ${callSid} at ${new Date().toISOString()}`);
       } catch (error) {
-        console.error(`Error closing push stream: ${error.message}`);
+        console.error(`Error closing push stream at ${new Date().toISOString()}: ${error.message}`);
       }
     }
   }
@@ -559,12 +575,12 @@ class WebSocketHandler {
   }
 
   concatenateBuffers(buffers) {
-    const totalLength = buffers.reduce((acc, buf) => acc + buf.length, 0);
+    const totalLength = buffers.reduce((acc, buf) => acc + buf.byteLength, 0);
     const result = new Uint8Array(totalLength);
     let offset = 0;
     for (const buf of buffers) {
-      result.set(buf, offset);
-      offset += buf.length;
+      result.set(new Uint8Array(buf), offset);
+      offset += buf.byteLength;
     }
     return result.buffer;
   }
