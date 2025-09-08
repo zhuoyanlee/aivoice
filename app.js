@@ -303,6 +303,7 @@ class WebSocketHandler {
     this.sessions = new Set();
     this.pushStreams = new Map();
     this.recognizers = new Map();
+    this.audioBuffers = new Map(); // Buffer for accumulating audio chunks
   }
 
   async fetch(request) {
@@ -344,6 +345,7 @@ class WebSocketHandler {
           case 'start':
             callSid = message.start.callSid;
             isFirstChunk = true;
+            this.audioBuffers.set(callSid, []); // Initialize buffer for this call
             console.log(`Media stream started: ${callSid}`);
 
             try {
@@ -371,6 +373,12 @@ class WebSocketHandler {
                 const debugSamples = new Int16Array(pcmData).slice(0, 5);
                 console.log(`PCM samples: [${Array.from(debugSamples)}]`);
                 
+                // Buffer the audio data
+                const buffer = this.audioBuffers.get(callSid);
+                buffer.push(new Uint8Array(wavChunk));
+                this.audioBuffers.set(callSid, buffer);
+
+                // Push to recognizer
                 pushStream.write(new Uint8Array(wavChunk));
                 console.log(`Pushed ${wavChunk.byteLength} bytes to Azure recognizer`);
                 
@@ -386,7 +394,15 @@ class WebSocketHandler {
           case 'stop':
             console.log(`Call ${callSid} ended`);
             if (recognizer) {
+              // Flush remaining buffer
+              const buffer = this.audioBuffers.get(callSid);
+              if (buffer && buffer.length > 0) {
+                const finalChunk = this.concatenateBuffers(buffer);
+                pushStream.write(finalChunk);
+                console.log(`Flushed ${finalChunk.byteLength} bytes to Azure recognizer`);
+              }
               await this.cleanupRecognizer(callSid);
+              this.audioBuffers.delete(callSid);
             }
             break;
         }
@@ -400,6 +416,7 @@ class WebSocketHandler {
       this.sessions.delete(webSocket);
       if (callSid && this.recognizers.has(callSid)) {
         this.cleanupRecognizer(callSid).catch(err => console.error('Cleanup error:', err));
+        this.audioBuffers.delete(callSid);
       }
     });
   }
@@ -410,8 +427,11 @@ class WebSocketHandler {
       
       const speechConfig = speechSdk.SpeechConfig.fromSubscription(this.env.AZURE_SPEECH_KEY, this.env.AZURE_SPEECH_REGION);
       speechConfig.speechRecognitionLanguage = 'en-US';
-      speechConfig.setProperty(speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, "2000"); // Adjust silence timeout
-      
+      speechConfig.setProperty(speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, "5000"); // Increased timeout
+      speechConfig.setProperty(speechSdk.PropertyId.Speech_InitialSilenceTimeoutMs, "2000");
+      speechConfig.setProperty(speechSdk.PropertyId.Speech_EndSilenceTimeoutMs, "2000");
+      speechConfig.setProperty(speechSdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, "2000");
+
       const pushStream = speechSdk.AudioInputStream.createPushStream();
       const audioConfig = speechSdk.AudioConfig.fromStreamInput(pushStream);
       const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
@@ -424,7 +444,13 @@ class WebSocketHandler {
           await this.updateCallTranscript(callSid, transcript);
           this.broadcastTranscription(callSid, transcript, 'realtime');
         } else if (e.result.reason === speechSdk.ResultReason.NoMatch) {
-          console.warn(`No speech detected: ${e.result.reason}`);
+          console.warn(`No speech detected: ${e.result.reason}, Duration: ${e.result.duration}`);
+        }
+      };
+
+      recognizer.intermediateResult = (s, e) => {
+        if (e.result.reason === speechSdk.ResultReason.IntermediateRecognizedSpeech) {
+          console.log(`Intermediate result: "${e.result.text}"`);
         }
       };
 
@@ -484,7 +510,6 @@ class WebSocketHandler {
       let sample = ((mantissa << 3) + 33) << exponent;
       if (sign) sample = -sample;
       
-      // Ensure values are within valid 16-bit range
       sample = Math.max(-32768, Math.min(32767, sample));
       pcmData[i] = sample;
     }
@@ -492,9 +517,8 @@ class WebSocketHandler {
     return pcmData.buffer;
   }
 
-  // Create WAV buffer for Azure Speech API
   createWavBuffer(pcmBuffer, includeHeader = false) {
-    const sampleRate = 8000; // Twilio uses 8kHz
+    const sampleRate = 8000;
     const channels = 1;
     const bitsPerSample = 16;
     const pcmData = new Int16Array(pcmBuffer);
@@ -514,24 +538,35 @@ class WebSocketHandler {
     };
 
     writeString(0, 'RIFF');
-    view.setUint32(4, 36 + dataSize, true); // Total file size - 8
+    view.setUint32(4, 36 + dataSize, true);
     writeString(8, 'WAVE');
     writeString(12, 'fmt ');
-    view.setUint32(16, 16, true); // fmt chunk size
-    view.setUint16(20, 1, true);  // Audio format (PCM)
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
     view.setUint16(22, channels, true);
     view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * channels * (bitsPerSample / 8), true); // Byte rate
-    view.setUint16(32, channels * (bitsPerSample / 8), true); // Block align
+    view.setUint32(28, sampleRate * channels * (bitsPerSample / 8), true);
+    view.setUint16(32, channels * (bitsPerSample / 8), true);
     view.setUint16(34, bitsPerSample, true);
     writeString(36, 'data');
-    view.setUint32(40, dataSize, true); // Data chunk size
+    view.setUint32(40, dataSize, true);
 
     const wavBuffer = new ArrayBuffer(wavHeader.byteLength + pcmBuffer.byteLength);
     new Uint8Array(wavBuffer).set(new Uint8Array(wavHeader), 0);
     new Uint8Array(wavBuffer).set(new Uint8Array(pcmBuffer), wavHeader.byteLength);
 
     return wavBuffer;
+  }
+
+  concatenateBuffers(buffers) {
+    const totalLength = buffers.reduce((acc, buf) => acc + buf.length, 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const buf of buffers) {
+      result.set(buf, offset);
+      offset += buf.length;
+    }
+    return result.buffer;
   }
 
   // Update call transcript in KV storage
