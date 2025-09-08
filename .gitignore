@@ -4,3 +4,7 @@ node_modules/*
 .wrangler/*
 azure-ws-test.js
 order.wav
+azure-debugger.js
+hi_converted.wav
+hi.wav
+Recording.wav
