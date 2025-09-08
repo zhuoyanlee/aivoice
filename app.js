@@ -55,9 +55,9 @@ router.post('/webhook/voice', async (request, env) => {
     <Start>
         <Stream name="realtime-transcription" url="${wsUrl}" />
     </Start>
-    <Say>I'm listening. Please speak, and I'll transcribe what you say in real-time.</Say>
-    <Pause length="10" />
-    <Record maxLength="100" playBeep="false" recordingStatusCallback="/webhook/recording" recordingStatusCallbackEvent="completed" />
+    <Say>Talk.</Say>
+    <Pause length="1" />
+    <Record maxLength="1000" playBeep="true" recordingStatusCallback="/webhook/recording" recordingStatusCallbackEvent="completed" />
     <Say>Thank you for your call.</Say>
 </Response>`;
 
