@@ -301,6 +301,7 @@ class WebSocketHandler {
     this.controller = controller;
     this.env = env;
     this.sessions = new Set();
+    this.pushStreams = new Map(); // Store push streams per callSid
   }
 
   async fetch(request) {
@@ -330,6 +331,7 @@ class WebSocketHandler {
 
     let callSid = null;
     let recognizer = null;
+    let pushStream = null;
     let isFirstChunk = true;
 
     webSocket.addEventListener('message', async (event) => {
@@ -344,7 +346,10 @@ class WebSocketHandler {
             console.log(`Media stream started: ${callSid}`);
 
             try {
-              recognizer = await this.setupAzureRecognizer(callSid);
+              const result = await this.setupAzureRecognizer(callSid);
+              recognizer = result.recognizer;
+              pushStream = result.pushStream;
+              this.pushStreams.set(callSid, pushStream); // Store pushStream for this callSid
               console.log(`Azure recognizer ready for ${callSid}`);
             } catch (error) {
               console.error(`Failed to setup Azure recognizer: ${error.message}`);
@@ -352,7 +357,7 @@ class WebSocketHandler {
             break;
 
           case 'media':
-            if (recognizer) {
+            if (recognizer && pushStream) {
               try {
                 console.log(`Processing media chunk ${message.media.chunk} for ${callSid}`);
                 
@@ -360,8 +365,8 @@ class WebSocketHandler {
                 const pcmData = this.convertMulawToPcm(audioData);
                 const wavChunk = this.createWavBuffer(pcmData, isFirstChunk);
                 
-                // Push audio to recognizer
-                recognizer.pushStream.writeStream(new Uint8Array(wavChunk));
+                // Push audio to the push stream
+                pushStream.write(new Uint8Array(wavChunk));
                 console.log(`Pushed ${wavChunk.byteLength} bytes to Azure recognizer`);
                 
                 isFirstChunk = false;
@@ -369,7 +374,7 @@ class WebSocketHandler {
                 console.error(`Error processing media: ${error.message}`);
               }
             } else {
-              console.warn(`Azure recognizer not initialized`);
+              console.warn(`Azure recognizer or push stream not initialized`);
             }
             break;
 
@@ -378,6 +383,10 @@ class WebSocketHandler {
             if (recognizer) {
               recognizer.stopContinuousRecognitionAsync();
               recognizer.close();
+            }
+            if (pushStream) {
+              pushStream.close();
+              this.pushStreams.delete(callSid); // Clean up pushStream
             }
             break;
         }
@@ -392,6 +401,10 @@ class WebSocketHandler {
       if (recognizer) {
         recognizer.stopContinuousRecognitionAsync();
         recognizer.close();
+      }
+      if (pushStream) {
+        pushStream.close();
+        this.pushStreams.delete(callSid); // Clean up pushStream
       }
     });
   }
@@ -432,7 +445,7 @@ class WebSocketHandler {
       await recognizer.startContinuousRecognitionAsync();
       console.log(`Started continuous recognition for ${callSid}`);
 
-      return recognizer;
+      return { recognizer, pushStream };
     } catch (error) {
       console.error(`Error in setupAzureRecognizer:`, error);
       throw error;
