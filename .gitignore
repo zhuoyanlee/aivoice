@@ -2,3 +2,5 @@ environment-backup.env
 local.env
 node_modules/*
 .wrangler/*
+azure-ws-test.js
+order.wav

@@ -291,7 +291,7 @@ async function transcribeWithAzureAPI(audioUrl, env, audioBuffer = null) {
   }
 }
 
-// Durable Object for WebSocket handling
+// FIXED Durable Object for WebSocket handling
 export class WebSocketHandler {
   constructor(controller, env) {
     this.controller = controller;
@@ -326,62 +326,62 @@ export class WebSocketHandler {
 
     let callSid = null;
     let azureSocket = null;
+    let isFirstChunk = true;
 
     webSocket.addEventListener('message', async (event) => {
       try {
         const message = JSON.parse(event.data);
+        console.log('Twilio event:', message.event);
 
         switch (message.event) {
           case 'start':
             callSid = message.start.callSid;
+            isFirstChunk = true;
             console.log(`Media stream started: ${callSid}`);
 
-            this.isFirstChunk = true;   // reset per call
-            azureSocket = await this.connectAzureWebSocket(callSid);
+            try {
+              azureSocket = await this.connectAzureWebSocket(callSid);
+              console.log(`Azure WebSocket ready for ${callSid}`);
+            } catch (error) {
+              console.error(`Failed to connect Azure WebSocket: ${error.message}`);
+            }
             break;
 
-
           case 'media':
-
             if (azureSocket && azureSocket.readyState === WebSocket.OPEN) {
-                              
-              console.log("Sending audio chunk:", message.media.chunk);
-              const audioData = Uint8Array.from(atob(message.media.payload), c => c.charCodeAt(0));
-              const pcmData = this.convertMulawToPcm(audioData);
-
-              // Send first chunk with header, others raw
-              const wavChunk = this.createWavBuffer(pcmData, this.isFirstChunk);
-              azureSocket.send(wavChunk);
-
-              this.isFirstChunk = false; // flip after first send
+              try {
+                console.log(`Processing media chunk ${message.media.chunk} for ${callSid}`);
+                
+                const audioData = Uint8Array.from(atob(message.media.payload), c => c.charCodeAt(0));
+                const pcmData = this.convertMulawToPcm(audioData);
+                const wavChunk = this.createWavBuffer(pcmData, isFirstChunk);
+                
+                azureSocket.send(wavChunk);
+                console.log(`Sent ${wavChunk.byteLength} bytes to Azure (first: ${isFirstChunk})`);
+                
+                isFirstChunk = false;
+              } catch (error) {
+                console.error(`Error processing media: ${error.message}`);
+              }
+            } else {
+              console.warn(`Azure WebSocket not ready. State: ${azureSocket?.readyState}`);
             }
             break;
 
           case 'stop':
-            console.log(`Call ${callSid} ended.`);
+            console.log(`Call ${callSid} ended`);
             if (azureSocket && azureSocket.readyState === WebSocket.OPEN) {
-              try {
-                // 🔥 Tell Azure no more audio is coming
-                azureSocket.send(JSON.stringify({ type: "endOfStream" }));
-
-                // Give Azure a short moment to respond with the last transcript
-                setTimeout(() => {
-                  azureSocket.close();
-                }, 1000);
-              } catch (err) {
-                console.error("Error sending endOfStream:", err);
-                azureSocket.close();
-              }
+              azureSocket.close(1000, 'Call ended');
             }
             break;
-
         }
       } catch (error) {
-        console.error('WebSocket message error:', error);
+        console.error('WebSocket message error:', error.message);
       }
     });
 
     webSocket.addEventListener('close', () => {
+      console.log(`Twilio WebSocket closed for ${callSid}`);
       this.sessions.delete(webSocket);
       if (azureSocket) {
         azureSocket.close();
@@ -389,232 +389,232 @@ export class WebSocketHandler {
     });
   }
 
+  async getAzureToken() {
+    console.log(`Getting token for region: ${this.env.AZURE_SPEECH_REGION}`);
 
-  async processMediaMessage(message, callSid) {
-    const { media } = message;
-
-    try {
-      const audioData = Uint8Array.from(atob(media.payload), c => c.charCodeAt(0));
-      const pcmData = this.convertMulawToPcm(audioData);
-
-      const transcript = await this.transcribeRealTime(pcmData, callSid);
-
-      if (transcript) {
-        await this.updateCallTranscript(callSid, transcript);
-        this.broadcastTranscription(callSid, transcript, 'realtime');
-        console.log(`Real-time transcript for ${callSid}: ${transcript}`);
+    const resp = await fetch(`https://${this.env.AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/sts/v1.0/issueToken`, {
+      method: 'POST',
+      headers: {
+        "Content-type": "application/x-www-form-urlencoded",
+        "Content-length": "0", 
+        "Ocp-Apim-Subscription-Key": this.env.AZURE_SPEECH_KEY
       }
-    } catch (error) {
-      console.error('Error processing real-time audio:', error);
+    });
+
+    if (!resp.ok) {
+      const errorText = await resp.text();
+      throw new Error(`Azure token request failed: ${resp.status} - ${errorText}`);
     }
+    
+    const token = await resp.text();
+    console.log(`Azure token obtained (${token.length} chars)`);
+    return token;
   }
 
-  // Convert mulaw to PCM for Azure Speech (Workers-compatible)
+  async connectAzureWebSocket(callSid) {
+    const token = await this.getAzureToken();
+    
+    // Construct the WebSocket URL
+    const url = `wss://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed&authorization=Bearer%20${encodeURIComponent(token)}`;
+    
+    console.log(`Connecting to Azure WebSocket for ${callSid}`);
+
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+      
+      const timeout = setTimeout(() => {
+        reject(new Error('Azure WebSocket connection timeout'));
+      }, 10000);
+
+      ws.addEventListener('open', () => {
+        clearTimeout(timeout);
+        console.log(`Azure WebSocket connected for ${callSid}`);
+        
+        // Send configuration message
+        try {
+          const configMessage = JSON.stringify({
+            context: {
+              system: { 
+                version: "1.0.00000" 
+              },
+              os: { 
+                platform: "CloudflareWorker",
+                name: "Worker",
+                version: "1.0"
+              },
+              audio: { 
+                source: "stream",
+                format: "wav"
+              }
+            }
+          });
+          
+          ws.send(configMessage);
+          console.log(`Sent config to Azure: ${configMessage}`);
+        } catch (configError) {
+          console.error('Error sending config:', configError);
+        }
+        
+        resolve(ws);
+      });
+
+      ws.addEventListener('message', async (event) => {
+        try {
+          console.log(`Raw Azure response: ${event.data}`);
+          const data = JSON.parse(event.data);
+          
+          // Handle different Azure response types
+          if (data.RecognitionStatus === "Success") {
+            if (data.DisplayText) {
+              const transcript = data.DisplayText;
+              console.log(`SUCCESS: Transcript received: "${transcript}"`);
+              
+              await this.updateCallTranscript(callSid, transcript);
+              this.broadcastTranscription(callSid, transcript, 'realtime');
+            } else if (data.NBest && data.NBest[0] && data.NBest[0].Display) {
+              const transcript = data.NBest[0].Display;
+              console.log(`SUCCESS (NBest): Transcript received: "${transcript}"`);
+              
+              await this.updateCallTranscript(callSid, transcript);
+              this.broadcastTranscription(callSid, transcript, 'realtime');
+            }
+          } else if (data.RecognitionStatus === "InitialSilenceTimeout") {
+            console.log(`Initial silence timeout for ${callSid}`);
+          } else if (data.RecognitionStatus === "BabbleTimeout") {
+            console.log(`Babble timeout for ${callSid}`);
+          } else if (data.RecognitionStatus === "Error") {
+            console.error(`Azure recognition error: ${data.ErrorDetails}`);
+          } else {
+            // Log any other message types
+            console.log(`Azure message type: ${data.RecognitionStatus || 'unknown'}`, data);
+          }
+        } catch (parseError) {
+          console.error(`Error parsing Azure message: ${parseError.message}`);
+          console.log(`Raw message was: ${event.data}`);
+        }
+      });
+
+      ws.addEventListener('close', (event) => {
+        clearTimeout(timeout);
+        console.log(`Azure WebSocket closed for ${callSid}. Code: ${event.code}, Reason: ${event.reason}`);
+      });
+
+      ws.addEventListener('error', (error) => {
+        clearTimeout(timeout);
+        console.error(`Azure WebSocket error for ${callSid}:`, error);
+        reject(error);
+      });
+    });
+  }
+
+  // Convert mulaw to PCM for Azure Speech
   convertMulawToPcm(mulawData) {
     const pcmData = new Int16Array(mulawData.length);
 
     for (let i = 0; i < mulawData.length; i++) {
       const mulaw = mulawData[i];
-
-      // Mulaw to linear PCM conversion
       const sign = (mulaw & 0x80) !== 0;
       const exponent = (mulaw >> 4) & 0x07;
       const mantissa = mulaw & 0x0F;
 
       let sample = ((mantissa << 3) + 33) << exponent;
-
       if (sign) sample = -sample;
-
-      // Clamp to 16-bit range
+      
       sample = Math.max(-32768, Math.min(32767, sample));
       pcmData[i] = sample;
     }
 
     return pcmData.buffer;
   }
-  async getAzureToken() {
-    console.log(`speech region: ${this.env.AZURE_SPEECH_REGION}`);
-    console.log(`speech key: ${this.env.AZURE_SPEECH_KEY}`);
 
-    const resp = await fetch(`https://${this.env.AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/sts/v1.0/issueToken`, {
-      method: 'POST',
-      headers: {
-        "Content-type": "application/x-www-form-urlencoded",
-        "Content-length": 0, 
-        "Ocp-Apim-Subscription-Key": this.env.AZURE_SPEECH_KEY
+  // Create WAV buffer for Azure Speech API
+  createWavBuffer(pcmBuffer, includeHeader = false) {
+    const sampleRate = 8000; // Twilio uses 8kHz
+    const channels = 1;
+    const bitsPerSample = 16;
+
+    if (!includeHeader) {
+      // Subsequent chunks → just raw PCM
+      return pcmBuffer;
+    }
+
+    // First chunk → include WAV header
+    const wavHeader = new ArrayBuffer(44);
+    const view = new DataView(wavHeader);
+
+    const writeString = (offset, string) => {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
       }
-    });
+    };
 
-    if (!resp.ok) {
-      throw new Error(`Azure token request failed: ${resp.status}`);
-    }
-    return await resp.text(); // JWT token string
+    // WAV header
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + pcmBuffer.byteLength, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true); // Subchunk1Size
+    view.setUint16(20, 1, true);  // AudioFormat (PCM)
+    view.setUint16(22, channels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * channels * (bitsPerSample / 8), true); // ByteRate
+    view.setUint16(32, channels * (bitsPerSample / 8), true); // BlockAlign
+    view.setUint16(34, bitsPerSample, true);
+    writeString(36, 'data');
+    view.setUint32(40, pcmBuffer.byteLength, true);
+
+    // Combine header and data
+    const wavBuffer = new ArrayBuffer(wavHeader.byteLength + pcmBuffer.byteLength);
+    new Uint8Array(wavBuffer).set(new Uint8Array(wavHeader), 0);
+    new Uint8Array(wavBuffer).set(new Uint8Array(pcmBuffer), wavHeader.byteLength);
+
+    return wavBuffer;
   }
-
-  async connectAzureWebSocket(callSid) {
-    const token = await this.getAzureToken();
-
-    console.log(`obtained azure token: ${token}`);
-
-    const url = `wss://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed&authorization=Bearer%20${encodeURIComponent(token)}`;
-
-    const ws = new WebSocket(url);
-
-    ws.addEventListener('open', () => {
-      console.log(`Azure WebSocket connected for call ${ callSid }`);
-
-      
-      ws.send(JSON.stringify({
-        context: {
-          system: { version: "1.0.00000" },
-          os: { platform: "CloudflareWorker" },
-          audio: { source: "stream" }
-        }
-      }));
-    });
-
-    ws.addEventListener('message', async (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        console.log(`azure message: ${ data } `);
-        if (data.RecognitionStatus === "Success" && data.DisplayText) {
-          const transcript = data.DisplayText;
-
-          console.log(`transcribing: ${transcript}`);
-          
-          await this.updateCallTranscript(callSid, transcript);
-          this.broadcastTranscription(callSid, transcript, 'realtime');
-
-          console.log(`Azure transcript[${ callSid }]: ${ transcript } `);
-        }
-        if (data.type === "speech.hypothesis" || data.type === "speech.phrase") {
-          console.log("Transcript:", data.text);
-
-        }
-      } catch (err) {
-        console.error("Azure WebSocket message error:", err);
-      }
-    });
-
-    ws.addEventListener('close', () => {
-      console.log(`Azure WebSocket closed for call ${ callSid }`);
-    });
-
-    ws.addEventListener('error', (err) => {
-      console.error(`Azure WebSocket error for ${ callSid }: `, err);
-    });
-
-    return ws;
-  }
-
-  // Real-time transcription using Azure Speech API
-  async transcribeRealTime(pcmBuffer, callSid) {
-    try {
-      const speechEndpoint = `https://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=simple`;
-
-    const response = await fetch(speechEndpoint, {
-      method: 'POST',
-      headers: {
-        'Ocp-Apim-Subscription-Key': this.env.AZURE_SPEECH_KEY,
-        'Content-Type': 'audio/wav',
-        'Accept': 'application/json'
-      },
-      body: this.createWavBuffer(pcmBuffer)
-    });
-
-    if (response.ok) {
-      const result = await response.json();
-      return result.DisplayText || '';
-    }
-
-  } catch(error) {
-    console.error('Azure real-time transcription error:', error);
-  }
-
-    return null;
-  }
-
-// Create WAV buffer for Azure Speech API
-// Create WAV buffer for Azure Speech API (streaming mode)
-createWavBuffer(pcmBuffer, includeHeader = false) {
-  const sampleRate = 8000; // Twilio uses 8kHz
-  const channels = 1;
-  const bitsPerSample = 16;
-
-  if (!includeHeader) {
-    // Subsequent chunks → just raw PCM
-    return pcmBuffer;
-  }
-
-  // First chunk → include WAV header
-  const wavHeader = new ArrayBuffer(44);
-  const view = new DataView(wavHeader);
-
-  const writeString = (offset, string) => {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i));
-    }
-  };
-
-  writeString(0, 'RIFF');
-  view.setUint32(4, 36 + pcmBuffer.byteLength, true);
-  writeString(8, 'WAVE');
-  writeString(12, 'fmt ');
-  view.setUint32(16, 16, true); // Subchunk1 size
-  view.setUint16(20, 1, true);  // PCM
-  view.setUint16(22, channels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * channels * (bitsPerSample / 8), true);
-  view.setUint16(32, channels * (bitsPerSample / 8), true);
-  view.setUint16(34, bitsPerSample, true);
-  writeString(36, 'data');
-  view.setUint32(40, pcmBuffer.byteLength, true);
-
-  const wavBuffer = new ArrayBuffer(wavHeader.byteLength + pcmBuffer.byteLength);
-  new Uint8Array(wavBuffer).set(new Uint8Array(wavHeader), 0);
-  new Uint8Array(wavBuffer).set(new Uint8Array(pcmBuffer), wavHeader.byteLength);
-
-  return wavBuffer;
-}
-
 
   // Update call transcript in KV storage
   async updateCallTranscript(callSid, transcript) {
-  try {
-    const callDataStr = await this.env.TRANSCRIPTIONS.get(`call:${callSid}`);
-    if (callDataStr) {
-      const callData = JSON.parse(callDataStr);
-      callData.realtimeTranscript += transcript + ' ';
-      callData.transcriptions.push({
-        transcript,
-        timestamp: new Date().toISOString(),
-        type: 'realtime'
-      });
-
-      await this.env.TRANSCRIPTIONS.put(`call:${callSid}`, JSON.stringify(callData));
-    }
-  } catch (error) {
-    console.error('Error updating call transcript:', error);
-  }
-}
-
-broadcastTranscription(callSid, transcript, type) {
-  const message = JSON.stringify({
-    event: 'transcription',
-    callSid,
-    transcript,
-    type,
-    timestamp: new Date().toISOString()
-  });
-
-  this.sessions.forEach(session => {
     try {
-      session.send(message);
+      const callDataStr = await this.env.TRANSCRIPTIONS.get(`call:${callSid}`);
+      if (callDataStr) {
+        const callData = JSON.parse(callDataStr);
+        callData.realtimeTranscript += transcript + ' ';
+        callData.transcriptions.push({
+          transcript,
+          timestamp: new Date().toISOString(),
+          type: 'realtime'
+        });
+
+        await this.env.TRANSCRIPTIONS.put(`call:${callSid}`, JSON.stringify(callData));
+        console.log(`Updated transcript for ${callSid}: "${transcript}"`);
+      } else {
+        console.warn(`No call data found for ${callSid}`);
+      }
     } catch (error) {
-      console.error('Error broadcasting to session:', error);
+      console.error('Error updating call transcript:', error);
     }
-  });
-}
+  }
+
+  broadcastTranscription(callSid, transcript, type) {
+    const message = JSON.stringify({
+      event: 'transcription',
+      callSid,
+      transcript,
+      type,
+      timestamp: new Date().toISOString()
+    });
+
+    console.log(`Broadcasting to ${this.sessions.size} sessions: "${transcript}"`);
+    
+    this.sessions.forEach(session => {
+      try {
+        if (session.readyState === WebSocket.OPEN) {
+          session.send(message);
+        }
+      } catch (error) {
+        console.error('Error broadcasting to session:', error);
+      }
+    });
+  }
 }
 
 // Main fetch handler
@@ -623,3 +623,6 @@ export default {
     return router.handle(request, env, ctx);
   }
 };
+
+// Export the Durable Object class
+export { WebSocketHandler };
