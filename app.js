@@ -390,7 +390,7 @@ class WebSocketHandler {
   }
 
   async getAzureToken() {
-    console.log(`Getting token for region: ${this.env.AZURE_SPEECH_REGION}`);
+    console.log(`Getting token for region: ${this.env.AZURE_SPEECH_REGION} with key: ${this.env.AZURE_SPEECH_KEY}`);
 
     const resp = await fetch(`https://${this.env.AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/sts/v1.0/issueToken`, {
       method: 'POST',
@@ -412,99 +412,106 @@ class WebSocketHandler {
   }
 
   async connectAzureWebSocket(callSid) {
-    const token = await this.getAzureToken();
-    
-    // Construct the WebSocket URL
-    const url = `wss://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed&authorization=Bearer%20${encodeURIComponent(token)}`;
-    
-    console.log(`Connecting to Azure WebSocket for ${callSid}`);
-
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
+    try {
+      console.log(`Starting Azure WebSocket connection for ${callSid}`);
+      const token = await this.getAzureToken();
       
-      const timeout = setTimeout(() => {
-        reject(new Error('Azure WebSocket connection timeout'));
-      }, 10000);
+      // Construct the WebSocket URL
+      const url = `wss://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed&authorization=Bearer%20${encodeURIComponent(token)}`;
+      
+      console.log(`Connecting to Azure WebSocket: ${url.substring(0, 100)}...`);
 
-      ws.addEventListener('open', () => {
-        clearTimeout(timeout);
-        console.log(`Azure WebSocket connected for ${callSid}`);
+      return new Promise((resolve, reject) => {
+        const ws = new WebSocket(url);
         
-        // Send configuration message
-        try {
-          const configMessage = JSON.stringify({
-            context: {
-              system: { 
-                version: "1.0.00000" 
-              },
-              os: { 
-                platform: "CloudflareWorker",
-                name: "Worker",
-                version: "1.0"
-              },
-              audio: { 
-                source: "stream",
-                format: "wav"
+        const timeout = setTimeout(() => {
+          console.error(`Azure WebSocket connection timeout for ${callSid}`);
+          reject(new Error('Azure WebSocket connection timeout'));
+        }, 10000);
+
+        ws.addEventListener('open', () => {
+          clearTimeout(timeout);
+          console.log(`Azure WebSocket connected successfully for ${callSid}`);
+          
+          // Send configuration message
+          try {
+            const configMessage = JSON.stringify({
+              context: {
+                system: { 
+                  version: "1.0.00000" 
+                },
+                os: { 
+                  platform: "CloudflareWorker",
+                  name: "Worker",
+                  version: "1.0"
+                },
+                audio: { 
+                  source: "stream",
+                  format: "wav"
+                }
               }
-            }
-          });
-          
-          ws.send(configMessage);
-          console.log(`Sent config to Azure: ${configMessage}`);
-        } catch (configError) {
-          console.error('Error sending config:', configError);
-        }
-        
-        resolve(ws);
-      });
-
-      ws.addEventListener('message', async (event) => {
-        try {
-          console.log(`Raw Azure response: ${event.data}`);
-          const data = JSON.parse(event.data);
-          
-          // Handle different Azure response types
-          if (data.RecognitionStatus === "Success") {
-            if (data.DisplayText) {
-              const transcript = data.DisplayText;
-              console.log(`SUCCESS: Transcript received: "${transcript}"`);
-              
-              await this.updateCallTranscript(callSid, transcript);
-              this.broadcastTranscription(callSid, transcript, 'realtime');
-            } else if (data.NBest && data.NBest[0] && data.NBest[0].Display) {
-              const transcript = data.NBest[0].Display;
-              console.log(`SUCCESS (NBest): Transcript received: "${transcript}"`);
-              
-              await this.updateCallTranscript(callSid, transcript);
-              this.broadcastTranscription(callSid, transcript, 'realtime');
-            }
-          } else if (data.RecognitionStatus === "InitialSilenceTimeout") {
-            console.log(`Initial silence timeout for ${callSid}`);
-          } else if (data.RecognitionStatus === "BabbleTimeout") {
-            console.log(`Babble timeout for ${callSid}`);
-          } else if (data.RecognitionStatus === "Error") {
-            console.error(`Azure recognition error: ${data.ErrorDetails}`);
-          } else {
-            // Log any other message types
-            console.log(`Azure message type: ${data.RecognitionStatus || 'unknown'}`, data);
+            });
+            
+            ws.send(configMessage);
+            console.log(`Sent config to Azure: ${configMessage}`);
+          } catch (configError) {
+            console.error('Error sending config:', configError);
           }
-        } catch (parseError) {
-          console.error(`Error parsing Azure message: ${parseError.message}`);
-          console.log(`Raw message was: ${event.data}`);
-        }
-      });
+          
+          resolve(ws);
+        });
 
-      ws.addEventListener('close', (event) => {
-        clearTimeout(timeout);
-        console.log(`Azure WebSocket closed for ${callSid}. Code: ${event.code}, Reason: ${event.reason}`);
-      });
+        ws.addEventListener('message', async (event) => {
+          try {
+            console.log(`Raw Azure response: ${event.data}`);
+            const data = JSON.parse(event.data);
+            
+            // Handle different Azure response types
+            if (data.RecognitionStatus === "Success") {
+              if (data.DisplayText) {
+                const transcript = data.DisplayText;
+                console.log(`SUCCESS: Transcript received: "${transcript}"`);
+                
+                await this.updateCallTranscript(callSid, transcript);
+                this.broadcastTranscription(callSid, transcript, 'realtime');
+              } else if (data.NBest && data.NBest[0] && data.NBest[0].Display) {
+                const transcript = data.NBest[0].Display;
+                console.log(`SUCCESS (NBest): Transcript received: "${transcript}"`);
+                
+                await this.updateCallTranscript(callSid, transcript);
+                this.broadcastTranscription(callSid, transcript, 'realtime');
+              }
+            } else if (data.RecognitionStatus === "InitialSilenceTimeout") {
+              console.log(`Initial silence timeout for ${callSid}`);
+            } else if (data.RecognitionStatus === "BabbleTimeout") {
+              console.log(`Babble timeout for ${callSid}`);
+            } else if (data.RecognitionStatus === "Error") {
+              console.error(`Azure recognition error: ${data.ErrorDetails}`);
+            } else {
+              // Log any other message types
+              console.log(`Azure message type: ${data.RecognitionStatus || 'unknown'}`, data);
+            }
+          } catch (parseError) {
+            console.error(`Error parsing Azure message: ${parseError.message}`);
+            console.log(`Raw message was: ${event.data}`);
+          }
+        });
 
-      ws.addEventListener('error', (error) => {
-        clearTimeout(timeout);
-        console.error(`Azure WebSocket error for ${callSid}:`, error);
-        reject(error);
+        ws.addEventListener('close', (event) => {
+          clearTimeout(timeout);
+          console.log(`Azure WebSocket closed for ${callSid}. Code: ${event.code}, Reason: ${event.reason}`);
+        });
+
+        ws.addEventListener('error', (error) => {
+          clearTimeout(timeout);
+          console.error(`Azure WebSocket error for ${callSid}:`, error);
+          reject(error);
+        });
       });
-    });
+    } catch (error) {
+      console.error(`Error in connectAzureWebSocket:`, error);
+      throw error;
+    }
   }
 
   // Convert mulaw to PCM for Azure Speech
