@@ -301,7 +301,8 @@ class WebSocketHandler {
     this.controller = controller;
     this.env = env;
     this.sessions = new Set();
-    this.pushStreams = new Map(); // Store push streams per callSid
+    this.pushStreams = new Map();
+    this.recognizers = new Map();
   }
 
   async fetch(request) {
@@ -349,7 +350,8 @@ class WebSocketHandler {
               const result = await this.setupAzureRecognizer(callSid);
               recognizer = result.recognizer;
               pushStream = result.pushStream;
-              this.pushStreams.set(callSid, pushStream); // Store pushStream for this callSid
+              this.recognizers.set(callSid, recognizer);
+              this.pushStreams.set(callSid, pushStream);
               console.log(`Azure recognizer ready for ${callSid}`);
             } catch (error) {
               console.error(`Failed to setup Azure recognizer: ${error.message}`);
@@ -365,7 +367,10 @@ class WebSocketHandler {
                 const pcmData = this.convertMulawToPcm(audioData);
                 const wavChunk = this.createWavBuffer(pcmData, isFirstChunk);
                 
-                // Push audio to the push stream
+                // Debug: Log first few PCM samples
+                const debugSamples = new Int16Array(pcmData).slice(0, 5);
+                console.log(`PCM samples: [${Array.from(debugSamples)}]`);
+                
                 pushStream.write(new Uint8Array(wavChunk));
                 console.log(`Pushed ${wavChunk.byteLength} bytes to Azure recognizer`);
                 
@@ -381,12 +386,7 @@ class WebSocketHandler {
           case 'stop':
             console.log(`Call ${callSid} ended`);
             if (recognizer) {
-              recognizer.stopContinuousRecognitionAsync();
-              recognizer.close();
-            }
-            if (pushStream) {
-              pushStream.close();
-              this.pushStreams.delete(callSid); // Clean up pushStream
+              await this.cleanupRecognizer(callSid);
             }
             break;
         }
@@ -398,13 +398,8 @@ class WebSocketHandler {
     webSocket.addEventListener('close', () => {
       console.log(`Twilio WebSocket closed for ${callSid}`);
       this.sessions.delete(webSocket);
-      if (recognizer) {
-        recognizer.stopContinuousRecognitionAsync();
-        recognizer.close();
-      }
-      if (pushStream) {
-        pushStream.close();
-        this.pushStreams.delete(callSid); // Clean up pushStream
+      if (callSid && this.recognizers.has(callSid)) {
+        this.cleanupRecognizer(callSid).catch(err => console.error('Cleanup error:', err));
       }
     });
   }
@@ -413,16 +408,14 @@ class WebSocketHandler {
     try {
       console.log(`Setting up Azure recognizer for ${callSid}`);
       
-      // Configure Speech SDK
       const speechConfig = speechSdk.SpeechConfig.fromSubscription(this.env.AZURE_SPEECH_KEY, this.env.AZURE_SPEECH_REGION);
       speechConfig.speechRecognitionLanguage = 'en-US';
+      speechConfig.setProperty(speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, "2000"); // Adjust silence timeout
       
-      // Create push stream for real-time audio
       const pushStream = speechSdk.AudioInputStream.createPushStream();
       const audioConfig = speechSdk.AudioConfig.fromStreamInput(pushStream);
       const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
 
-      // Set up recognition event handlers
       recognizer.recognized = async (s, e) => {
         if (e.result.reason === speechSdk.ResultReason.RecognizedSpeech) {
           const transcript = e.result.text;
@@ -430,6 +423,8 @@ class WebSocketHandler {
           
           await this.updateCallTranscript(callSid, transcript);
           this.broadcastTranscription(callSid, transcript, 'realtime');
+        } else if (e.result.reason === speechSdk.ResultReason.NoMatch) {
+          console.warn(`No speech detected: ${e.result.reason}`);
         }
       };
 
@@ -441,7 +436,6 @@ class WebSocketHandler {
         console.log(`Recognition session stopped for ${callSid}`);
       };
 
-      // Start continuous recognition
       await recognizer.startContinuousRecognitionAsync();
       console.log(`Started continuous recognition for ${callSid}`);
 
@@ -452,7 +446,32 @@ class WebSocketHandler {
     }
   }
 
-  // Convert mulaw to PCM for Azure Speech
+  async cleanupRecognizer(callSid) {
+    const recognizer = this.recognizers.get(callSid);
+    const pushStream = this.pushStreams.get(callSid);
+
+    if (recognizer) {
+      try {
+        await recognizer.stopContinuousRecognitionAsync();
+        recognizer.close();
+        this.recognizers.delete(callSid);
+        console.log(`Recognizer cleaned up for ${callSid}`);
+      } catch (error) {
+        console.error(`Error stopping recognizer: ${error.message}`);
+      }
+    }
+
+    if (pushStream) {
+      try {
+        pushStream.close();
+        this.pushStreams.delete(callSid);
+        console.log(`Push stream cleaned up for ${callSid}`);
+      } catch (error) {
+        console.error(`Error closing push stream: ${error.message}`);
+      }
+    }
+  }
+
   convertMulawToPcm(mulawData) {
     const pcmData = new Int16Array(mulawData.length);
 
@@ -465,6 +484,7 @@ class WebSocketHandler {
       let sample = ((mantissa << 3) + 33) << exponent;
       if (sign) sample = -sample;
       
+      // Ensure values are within valid 16-bit range
       sample = Math.max(-32768, Math.min(32767, sample));
       pcmData[i] = sample;
     }
@@ -477,13 +497,13 @@ class WebSocketHandler {
     const sampleRate = 8000; // Twilio uses 8kHz
     const channels = 1;
     const bitsPerSample = 16;
+    const pcmData = new Int16Array(pcmBuffer);
 
     if (!includeHeader) {
-      // Subsequent chunks → just raw PCM
       return pcmBuffer;
     }
 
-    // First chunk → include WAV header
+    const dataSize = pcmData.length * (bitsPerSample / 8);
     const wavHeader = new ArrayBuffer(44);
     const view = new DataView(wavHeader);
 
@@ -493,22 +513,20 @@ class WebSocketHandler {
       }
     };
 
-    // WAV header
     writeString(0, 'RIFF');
-    view.setUint32(4, 36 + pcmBuffer.byteLength, true);
+    view.setUint32(4, 36 + dataSize, true); // Total file size - 8
     writeString(8, 'WAVE');
     writeString(12, 'fmt ');
-    view.setUint32(16, 16, true); // Subchunk1Size
-    view.setUint16(20, 1, true);  // AudioFormat (PCM)
+    view.setUint32(16, 16, true); // fmt chunk size
+    view.setUint16(20, 1, true);  // Audio format (PCM)
     view.setUint16(22, channels, true);
     view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * channels * (bitsPerSample / 8), true); // ByteRate
-    view.setUint16(32, channels * (bitsPerSample / 8), true); // BlockAlign
+    view.setUint32(28, sampleRate * channels * (bitsPerSample / 8), true); // Byte rate
+    view.setUint16(32, channels * (bitsPerSample / 8), true); // Block align
     view.setUint16(34, bitsPerSample, true);
     writeString(36, 'data');
-    view.setUint32(40, pcmBuffer.byteLength, true);
+    view.setUint32(40, dataSize, true); // Data chunk size
 
-    // Combine header and data
     const wavBuffer = new ArrayBuffer(wavHeader.byteLength + pcmBuffer.byteLength);
     new Uint8Array(wavBuffer).set(new Uint8Array(wavHeader), 0);
     new Uint8Array(wavBuffer).set(new Uint8Array(pcmBuffer), wavHeader.byteLength);
