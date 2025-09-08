@@ -291,8 +291,8 @@ async function transcribeWithAzureAPI(audioUrl, env, audioBuffer = null) {
   }
 }
 
-// FIXED Durable Object for WebSocket handling
-export class WebSocketHandler {
+// Durable Object for WebSocket handling
+class WebSocketHandler {
   constructor(controller, env) {
     this.controller = controller;
     this.env = env;
