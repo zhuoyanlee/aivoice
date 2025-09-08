@@ -390,7 +390,7 @@ class WebSocketHandler {
   }
 
   async getAzureToken() {
-    console.log(`Getting token for region: ${this.env.AZURE_SPEECH_REGION} with key: ${this.env.AZURE_SPEECH_KEY}`);
+    console.log(`Getting token for region: ${this.env.AZURE_SPEECH_REGION}`);
 
     const resp = await fetch(`https://${this.env.AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/sts/v1.0/issueToken`, {
       method: 'POST',
