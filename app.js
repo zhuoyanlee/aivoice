@@ -232,6 +232,83 @@ router.get('/calls', async (request, env) => {
   }
 });
 
+// Test Azure Speech API connection
+router.get('/test-azure', async (request, env) => {
+  try {
+    console.log(`Testing Azure Speech API...`);
+    console.log(`Region: ${env.AZURE_SPEECH_REGION}`);
+    console.log(`Key exists: ${!!env.AZURE_SPEECH_KEY}`);
+    
+    const speechConfig = speechSdk.SpeechConfig.fromSubscription(env.AZURE_SPEECH_KEY, env.AZURE_SPEECH_REGION);
+    speechConfig.speechRecognitionLanguage = 'en-US';
+    
+    // Create a simple test with silence
+    const testAudioData = new Int16Array(8000); // 1 second of silence at 8kHz
+    testAudioData.fill(0);
+    
+    const audioBuffer = new ArrayBuffer(testAudioData.length * 2);
+    const view = new DataView(audioBuffer);
+    for (let i = 0; i < testAudioData.length; i++) {
+      view.setInt16(i * 2, testAudioData[i], true);
+    }
+    
+    const audioConfig = speechSdk.AudioConfig.fromWavFileInput(new Uint8Array(audioBuffer));
+    const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
+
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        recognizer.close();
+        resolve(new Response(JSON.stringify({
+          status: 'timeout',
+          message: 'Azure Speech API test timed out'
+        }), {
+          headers: { 'Content-Type': 'application/json' }
+        }));
+      }, 10000);
+
+      recognizer.recognizeOnceAsync(
+        result => {
+          clearTimeout(timeout);
+          console.log(`Test result: ${result.reason}, Text: "${result.text}"`);
+          
+          recognizer.close();
+          resolve(new Response(JSON.stringify({
+            status: 'success',
+            reason: result.reason,
+            text: result.text || 'No text',
+            message: 'Azure Speech API is accessible'
+          }), {
+            headers: { 'Content-Type': 'application/json' }
+          }));
+        },
+        error => {
+          clearTimeout(timeout);
+          console.error(`Test error: ${error}`);
+          
+          recognizer.close();
+          resolve(new Response(JSON.stringify({
+            status: 'error',
+            error: error.toString(),
+            message: 'Azure Speech API test failed'
+          }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+          }));
+        }
+      );
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({
+      status: 'error',
+      error: error.message,
+      message: 'Failed to initialize Azure Speech API'
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+});
+
 // Health check
 router.get('/health', () => {
   return new Response(JSON.stringify({
