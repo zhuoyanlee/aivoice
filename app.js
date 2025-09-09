@@ -330,24 +330,22 @@ class WebSocketHandler {
   async handleSession(webSocket) {
     webSocket.accept();
     this.sessions.add(webSocket);
-
+  
     let callSid = null;
     let recognizer = null;
     let pushStream = null;
-    let isFirstChunk = true;
-
+  
     webSocket.addEventListener('message', async (event) => {
       try {
         const message = JSON.parse(event.data);
         console.log('Twilio event:', message.event);
-
+  
         switch (message.event) {
           case 'start':
             callSid = message.start.callSid;
-            isFirstChunk = true;
-            this.audioBuffers.set(callSid, []); // Initialize buffer for this call
+            this.audioBuffers.set(callSid, []);
             console.log(`Media stream started: ${callSid}`);
-
+  
             try {
               const result = await this.setupAzureRecognizer(callSid);
               recognizer = result.recognizer;
@@ -359,30 +357,24 @@ class WebSocketHandler {
               console.error(`Failed to setup Azure recognizer: ${error.message}`);
             }
             break;
-
+  
           case 'media':
             if (recognizer && pushStream) {
               try {
                 console.log(`Processing media chunk ${message.media.chunk} for ${callSid}`);
-                
+  
+                // Decode base64 → µ-law → PCM16
                 const audioData = Uint8Array.from(atob(message.media.payload), c => c.charCodeAt(0));
                 const pcmData = this.convertMulawToPcm(audioData);
-                const wavChunk = this.createWavBuffer(pcmData, isFirstChunk);
-                
-                // Debug: Log first few PCM samples
+  
+                // Debug first few PCM samples
                 const debugSamples = new Int16Array(pcmData).slice(0, 5);
                 console.log(`PCM samples: [${Array.from(debugSamples)}]`);
-                
-                // Buffer the audio data
-                const buffer = this.audioBuffers.get(callSid);
-                buffer.push(new Uint8Array(wavChunk));
-                this.audioBuffers.set(callSid, buffer);
-
-                // Push to recognizer
-                pushStream.write(new Uint8Array(wavChunk));
-                console.log(`Pushed ${wavChunk.byteLength} bytes to Azure recognizer`);
-                
-                isFirstChunk = false;
+  
+                // Push **raw PCM16** (no WAV header!)
+                pushStream.write(pcmData);
+  
+                console.log(`Pushed ${pcmData.byteLength} bytes to Azure recognizer`);
               } catch (error) {
                 console.error(`Error processing media: ${error.message}`);
               }
@@ -390,17 +382,10 @@ class WebSocketHandler {
               console.warn(`Azure recognizer or push stream not initialized`);
             }
             break;
-
+  
           case 'stop':
             console.log(`Call ${callSid} ended`);
             if (recognizer) {
-              // Flush remaining buffer
-              const buffer = this.audioBuffers.get(callSid);
-              if (buffer && buffer.length > 0) {
-                const finalChunk = this.concatenateBuffers(buffer);
-                pushStream.write(finalChunk);
-                console.log(`Flushed ${finalChunk.byteLength} bytes to Azure recognizer`);
-              }
               await this.cleanupRecognizer(callSid);
               this.audioBuffers.delete(callSid);
             }
@@ -410,7 +395,7 @@ class WebSocketHandler {
         console.error('WebSocket message error:', error.message);
       }
     });
-
+  
     webSocket.addEventListener('close', () => {
       console.log(`Twilio WebSocket closed for ${callSid}`);
       this.sessions.delete(webSocket);
@@ -420,57 +405,47 @@ class WebSocketHandler {
       }
     });
   }
+  
 
   async setupAzureRecognizer(callSid) {
-    try {
-      console.log(`Setting up Azure recognizer for ${callSid}`);
-      
-      const speechConfig = speechSdk.SpeechConfig.fromSubscription(this.env.AZURE_SPEECH_KEY, this.env.AZURE_SPEECH_REGION);
-      speechConfig.speechRecognitionLanguage = 'en-US';
-      speechConfig.setProperty(speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, "5000"); // Increased timeout
-      speechConfig.setProperty(speechSdk.PropertyId.Speech_InitialSilenceTimeoutMs, "2000");
-      speechConfig.setProperty(speechSdk.PropertyId.Speech_EndSilenceTimeoutMs, "2000");
-      speechConfig.setProperty(speechSdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, "2000");
-
-      const pushStream = speechSdk.AudioInputStream.createPushStream();
-      const audioConfig = speechSdk.AudioConfig.fromStreamInput(pushStream);
-      const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
-
-      recognizer.recognized = async (s, e) => {
-        if (e.result.reason === speechSdk.ResultReason.RecognizedSpeech) {
-          const transcript = e.result.text;
-          console.log(`SUCCESS: Transcript received: "${transcript}"`);
-          
-          await this.updateCallTranscript(callSid, transcript);
-          this.broadcastTranscription(callSid, transcript, 'realtime');
-        } else if (e.result.reason === speechSdk.ResultReason.NoMatch) {
-          console.warn(`No speech detected: ${e.result.reason}, Duration: ${e.result.duration}`);
-        }
-      };
-
-      recognizer.intermediateResult = (s, e) => {
-        if (e.result.reason === speechSdk.ResultReason.IntermediateRecognizedSpeech) {
-          console.log(`Intermediate result: "${e.result.text}"`);
-        }
-      };
-
-      recognizer.canceled = (s, e) => {
-        console.error(`Recognition canceled: ${e.errorDetails}`);
-      };
-
-      recognizer.sessionStopped = () => {
-        console.log(`Recognition session stopped for ${callSid}`);
-      };
-
-      await recognizer.startContinuousRecognitionAsync();
-      console.log(`Started continuous recognition for ${callSid}`);
-
-      return { recognizer, pushStream };
-    } catch (error) {
-      console.error(`Error in setupAzureRecognizer:`, error);
-      throw error;
-    }
+    console.log(`Setting up Azure recognizer for ${callSid}`);
+  
+    const speechConfig = speechSdk.SpeechConfig.fromSubscription(
+      this.env.AZURE_SPEECH_KEY,
+      this.env.AZURE_SPEECH_REGION
+    );
+    speechConfig.speechRecognitionLanguage = 'en-US';
+    speechConfig.setProperty(speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, "5000");
+  
+    const pushStream = speechSdk.AudioInputStream.createPushStream();
+    const audioConfig = speechSdk.AudioConfig.fromStreamInput(pushStream);
+    const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
+  
+    recognizer.recognized = async (s, e) => {
+      if (e.result.reason === speechSdk.ResultReason.RecognizedSpeech) {
+        const transcript = e.result.text;
+        console.log(`SUCCESS: Transcript received: "${transcript}"`);
+        await this.updateCallTranscript(callSid, transcript);
+        this.broadcastTranscription(callSid, transcript, 'realtime');
+      }
+    };
+  
+    recognizer.canceled = (s, e) => {
+      console.error(`Recognition canceled: ${e.errorDetails}`);
+    };
+  
+    recognizer.sessionStopped = () => {
+      console.log(`Recognition session stopped for ${callSid}`);
+    };
+  
+    recognizer.startContinuousRecognitionAsync(
+      () => console.log(`Started continuous recognition for ${callSid}`),
+      err => console.error("Recognition start failed:", err)
+    );
+  
+    return { recognizer, pushStream };
   }
+  
 
   async cleanupRecognizer(callSid) {
     const recognizer = this.recognizers.get(callSid);
