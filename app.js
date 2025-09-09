@@ -338,7 +338,7 @@ class WebSocketHandler {
     webSocket.addEventListener('message', async (event) => {
       try {
         const message = JSON.parse(event.data);
-        console.log('Twilio event:', message.event);
+        // console.log('Twilio event:', message.event);
   
         switch (message.event) {
           case 'start':
@@ -361,17 +361,17 @@ class WebSocketHandler {
           case 'media':
             if (recognizer && pushStream) {
               try {
-                console.log(`Processing media chunk ${message.media.chunk} for ${callSid}`);
+                // console.log(`Processing media chunk ${message.media.chunk} for ${callSid}`);
   
                 // Decode base64 → µ-law → PCM16
                 const audioData = Uint8Array.from(atob(message.media.payload), c => c.charCodeAt(0));
                 
                 const pcmBytes = this.convertMulawToPcm(audioData);
                 pushStream.write(pcmBytes);
-                console.log(`First 10 PCM bytes: [${Array.from(pcmBytes.slice(0, 10))}]`);
+                // console.log(`First 10 PCM bytes: [${Array.from(pcmBytes.slice(0, 10))}]`);
 
   
-                console.log(`Pushed ${pcmBytes.byteLength} bytes to Azure recognizer`);
+                // console.log(`Pushed ${pcmBytes.byteLength} bytes to Azure recognizer`);
               } catch (error) {
                 console.error(`Error processing media: ${error.message}`);
               }
