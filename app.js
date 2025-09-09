@@ -412,18 +412,28 @@ class WebSocketHandler {
       this.env.AZURE_SPEECH_REGION
     );
     speechConfig.speechRecognitionLanguage = 'en-US';
-    speechConfig.setProperty(speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, "5000");
   
     const pushStream = speechSdk.AudioInputStream.createPushStream();
     const audioConfig = speechSdk.AudioConfig.fromStreamInput(pushStream);
     const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
   
+    // 🔹 Intermediate results while caller is speaking
+    recognizer.recognizing = (s, e) => {
+      if (e.result.reason === speechSdk.ResultReason.RecognizingSpeech) {
+        console.log(`Partial: "${e.result.text}"`);
+        this.broadcastTranscription(callSid, e.result.text, 'partial');
+      }
+    };
+  
+    // 🔹 Finalized sentences
     recognizer.recognized = async (s, e) => {
       if (e.result.reason === speechSdk.ResultReason.RecognizedSpeech) {
         const transcript = e.result.text;
-        console.log(`SUCCESS: Transcript received: "${transcript}"`);
+        console.log(`Final: "${transcript}"`);
         await this.updateCallTranscript(callSid, transcript);
-        this.broadcastTranscription(callSid, transcript, 'realtime');
+        this.broadcastTranscription(callSid, transcript, 'final');
+      } else if (e.result.reason === speechSdk.ResultReason.NoMatch) {
+        console.warn(`No speech recognized for ${callSid}`);
       }
     };
   
@@ -435,13 +445,15 @@ class WebSocketHandler {
       console.log(`Recognition session stopped for ${callSid}`);
     };
   
+    // 🔹 Must call like this (not with await)
     recognizer.startContinuousRecognitionAsync(
-      () => console.log(`Started continuous recognition for ${callSid}`),
-      err => console.error("Recognition start failed:", err)
+      () => console.log(`Continuous recognition started for ${callSid}`),
+      err => console.error("Failed to start recognition:", err)
     );
   
     return { recognizer, pushStream };
   }
+  
   
 
   async cleanupRecognizer(callSid) {
