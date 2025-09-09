@@ -358,27 +358,18 @@ class WebSocketHandler {
             }
             break;
   
-          case 'media':
-            if (recognizer && pushStream) {
-              try {
-                // console.log(`Processing media chunk ${message.media.chunk} for ${callSid}`);
-  
-                // Decode base64 → µ-law → PCM16
+            case 'media':
+              if (recognizer && pushStream) {
                 const audioData = Uint8Array.from(atob(message.media.payload), c => c.charCodeAt(0));
-                
                 const pcmBytes = this.convertMulawToPcm(audioData);
+            
+                // Debug log: should not be all zeros
+                console.log(`First 10 PCM bytes: [${Array.from(pcmBytes.slice(0, 10))}]`);
+            
                 pushStream.write(pcmBytes);
-                // console.log(`First 10 PCM bytes: [${Array.from(pcmBytes.slice(0, 10))}]`);
-
-  
-                // console.log(`Pushed ${pcmBytes.byteLength} bytes to Azure recognizer`);
-              } catch (error) {
-                console.error(`Error processing media: ${error.message}`);
               }
-            } else {
-              console.warn(`Azure recognizer or push stream not initialized`);
-            }
-            break;
+              break;
+            
   
           case 'stop':
             console.log(`Call ${callSid} ended`);
@@ -425,6 +416,12 @@ class WebSocketHandler {
       }
     };
   
+    recognizer.recognizing = (s, e) => {
+      if (e.result.reason === speechSdk.ResultReason.RecognizingSpeech) {
+        console.log(`Partial: "${e.result.text}"`);
+      }
+    };
+    
     // 🔹 Finalized sentences
     recognizer.recognized = async (s, e) => {
       if (e.result.reason === speechSdk.ResultReason.RecognizedSpeech) {
@@ -484,20 +481,17 @@ class WebSocketHandler {
 
   convertMulawToPcm(mulawData) {
     const pcmData = new Int16Array(mulawData.length);
-    const MULAW_EXP_LUT = [
-      0, 132, 396, 924, 1980, 4092, 8316, 16764
-    ];
   
     for (let i = 0; i < mulawData.length; i++) {
       let mu = ~mulawData[i];
       let sign = (mu & 0x80) ? -1 : 1;
       let exponent = (mu >> 4) & 0x07;
       let mantissa = mu & 0x0F;
-      let sample = MULAW_EXP_LUT[exponent] + (mantissa << (exponent + 3));
+      let sample = ((mantissa << 3) + 132) << (exponent + 2);
       pcmData[i] = sign * sample;
     }
   
-    // Force little-endian byte array
+    // Convert Int16Array → Uint8Array (little-endian)
     const buffer = new ArrayBuffer(pcmData.length * 2);
     const view = new DataView(buffer);
     for (let i = 0; i < pcmData.length; i++) {
@@ -505,6 +499,7 @@ class WebSocketHandler {
     }
     return new Uint8Array(buffer);
   }
+  
   
 
   createWavBuffer(pcmBuffer, includeHeader = false) {
