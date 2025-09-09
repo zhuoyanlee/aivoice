@@ -365,16 +365,13 @@ class WebSocketHandler {
   
                 // Decode base64 → µ-law → PCM16
                 const audioData = Uint8Array.from(atob(message.media.payload), c => c.charCodeAt(0));
-                const pcmData = this.convertMulawToPcm(audioData);
+                
+                const pcmBytes = this.convertMulawToPcm(audioData);
+                pushStream.write(pcmBytes);
+                console.log(`First 10 PCM bytes: [${Array.from(pcmBytes.slice(0, 10))}]`);
+
   
-                // Debug first few PCM samples
-                const debugSamples = new Int16Array(pcmData).slice(0, 5);
-                console.log(`PCM samples: [${Array.from(debugSamples)}]`);
-  
-                // Push **raw PCM16** (no WAV header!)
-                pushStream.write(pcmData);
-  
-                console.log(`Pushed ${pcmData.byteLength} bytes to Azure recognizer`);
+                console.log(`Pushed ${pcmBytes.byteLength} bytes to Azure recognizer`);
               } catch (error) {
                 console.error(`Error processing media: ${error.message}`);
               }
@@ -475,22 +472,28 @@ class WebSocketHandler {
 
   convertMulawToPcm(mulawData) {
     const pcmData = new Int16Array(mulawData.length);
-
+    const MULAW_EXP_LUT = [
+      0, 132, 396, 924, 1980, 4092, 8316, 16764
+    ];
+  
     for (let i = 0; i < mulawData.length; i++) {
-      const mulaw = mulawData[i];
-      const sign = (mulaw & 0x80) !== 0;
-      const exponent = (mulaw >> 4) & 0x07;
-      const mantissa = mulaw & 0x0F;
-
-      let sample = ((mantissa << 3) + 33) << exponent;
-      if (sign) sample = -sample;
-      
-      sample = Math.max(-32768, Math.min(32767, sample));
-      pcmData[i] = sample;
+      let mu = ~mulawData[i];
+      let sign = (mu & 0x80) ? -1 : 1;
+      let exponent = (mu >> 4) & 0x07;
+      let mantissa = mu & 0x0F;
+      let sample = MULAW_EXP_LUT[exponent] + (mantissa << (exponent + 3));
+      pcmData[i] = sign * sample;
     }
-
-    return pcmData.buffer;
+  
+    // Force little-endian byte array
+    const buffer = new ArrayBuffer(pcmData.length * 2);
+    const view = new DataView(buffer);
+    for (let i = 0; i < pcmData.length; i++) {
+      view.setInt16(i * 2, pcmData[i], true); // true = little-endian
+    }
+    return new Uint8Array(buffer);
   }
+  
 
   createWavBuffer(pcmBuffer, includeHeader = false) {
     const sampleRate = 8000;
