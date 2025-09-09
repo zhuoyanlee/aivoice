@@ -1,7 +1,304 @@
-// Fixed Durable Object for WebSocket handling
-class WebSocketHandler {
-  constructor(controller, env) {
-    this.controller = controller;
+// ES Modules format for Cloudflare Workers
+import { Router } from 'itty-router';
+import * as speechSdk from 'microsoft-cognitiveservices-speech-sdk';
+
+const router = Router();
+
+// Root endpoint
+router.get('/', () => {
+  return new Response(JSON.stringify({
+    message: 'Twilio Real-Time Voice-to-Text Backend API - Cloudflare Workers',
+    endpoints: {
+      '/webhook/voice': 'POST - Twilio voice webhook',
+      '/webhook/recording': 'POST - Twilio recording webhook (fallback)',
+      '/transcribe': 'POST - Direct transcription endpoint',
+      '/call/:callSid/transcript': 'GET - Get call transcript',
+      '/ws': 'WebSocket - Real-time transcription updates',
+      '/health': 'GET - Health check'
+    }
+  }), {
+    headers: { 'Content-Type': 'application/json' }
+  });
+});
+
+// Twilio voice webhook - handles incoming calls
+router.post('/webhook/voice', async (request, env) => {
+  const formData = await request.formData();
+  const callSid = formData.get('CallSid');
+  const from = formData.get('From');
+  const to = formData.get('To');
+  const callStatus = formData.get('CallStatus');
+
+  console.log(`Incoming call: ${callSid} from ${from} to ${to}, status: ${callStatus}`);
+
+  // Store call data in KV
+  const callData = {
+    from,
+    to,
+    startTime: new Date().toISOString(),
+    transcriptions: [],
+    realtimeTranscript: '',
+    status: callStatus,
+    isRealTime: true
+  };
+
+  await env.TRANSCRIPTIONS.put(`call:${callSid}`, JSON.stringify(callData));
+
+  // Get WebSocket URL for this request
+  const url = new URL(request.url);
+  const wsUrl = `wss://${url.host}/ws`;
+
+  // TwiML response with Media Stream
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>Hello! This is Fong's Kitchen</Say>
+    <Start>
+        <Stream name="realtime-transcription" url="${wsUrl}" />
+    </Start>
+    <Say>Talk.</Say>
+    <Pause length="1" />
+    <Record maxLength="1000" playBeep="true" recordingStatusCallback="/webhook/recording" recordingStatusCallbackEvent="completed" />
+    <Say>Thank you for your call.</Say>
+</Response>`;
+
+  return new Response(twiml, {
+    headers: { 'Content-Type': 'text/xml' }
+  });
+});
+
+// WebSocket endpoint
+router.get('/ws', async (request, env) => {
+  const upgradeHeader = request.headers.get('Upgrade');
+  if (!upgradeHeader || upgradeHeader !== 'websocket') {
+    return new Response('Expected Upgrade: websocket', { status: 426 });
+  }
+
+  // Get Durable Object instance
+  const id = env.WEBSOCKET_HANDLER.idFromName('websocket-session');
+  const obj = env.WEBSOCKET_HANDLER.get(id);
+
+  // Forward the request to the Durable Object
+  return obj.fetch(request);
+});
+
+// Fallback recording webhook
+router.post('/webhook/recording', async (request, env) => {
+  const formData = await request.formData();
+  const callSid = formData.get('CallSid');
+  const recordingUrl = formData.get('RecordingUrl');
+  const recordingSid = formData.get('RecordingSid');
+  const recordingDuration = formData.get('RecordingDuration');
+
+  console.log(`Recording completed for call ${callSid}: ${recordingUrl}`);
+
+  try {
+    // Get call data from KV
+    const callDataStr = await env.TRANSCRIPTIONS.get(`call:${callSid}`);
+    const callData = callDataStr ? JSON.parse(callDataStr) : null;
+
+    if (callData && !callData.realtimeTranscript) {
+      // Download audio from Twilio and get buffer
+      const audioUrl = `${recordingUrl}.wav`;
+      const audioResponse = await fetch(audioUrl, {
+        headers: {
+          'Authorization': `Basic ${btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)}`
+        }
+      });
+
+      if (audioResponse.ok) {
+        const audioBuffer = await audioResponse.arrayBuffer();
+
+        // Store in R2 for backup (optional)
+        const fileName = `recording-${recordingSid}.wav`;
+        await env.AUDIO_BUCKET.put(fileName, audioBuffer);
+
+        // Transcribe using audio buffer
+        const transcript = await transcribeWithAzureAPI(null, env, audioBuffer);
+
+        callData.transcriptions.push({
+          recordingSid,
+          transcript,
+          duration: recordingDuration,
+          timestamp: new Date().toISOString(),
+          type: 'fallback',
+          audioFile: fileName
+        });
+        callData.status = 'transcribed';
+
+        await env.TRANSCRIPTIONS.put(`call:${callSid}`, JSON.stringify(callData));
+
+        console.log(`Fallback transcription completed for ${callSid}:`, transcript);
+      } else {
+        console.error(`Failed to download recording: ${audioResponse.statusText}`);
+      }
+    }
+  } catch (error) {
+    console.error('Error processing fallback recording:', error);
+  }
+
+  return new Response('OK');
+});
+
+// Direct transcription endpoint
+router.post('/transcribe', async (request, env) => {
+  try {
+    const formData = await request.formData();
+    const audioFile = formData.get('audio');
+
+    if (!audioFile) {
+      return new Response(JSON.stringify({ error: 'No audio file provided' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Store audio in R2 bucket
+    const fileName = `transcribe-${Date.now()}.wav`;
+    await env.AUDIO_BUCKET.put(fileName, audioFile.stream());
+
+    // Get signed URL for Azure Speech API
+    const audioUrl = `https://your-domain.com/audio/${fileName}`;
+    const transcript = await transcribeWithAzureAPI(audioUrl, env);
+
+    // Clean up
+    await env.AUDIO_BUCKET.delete(fileName);
+
+    return new Response(JSON.stringify({
+      transcript,
+      filename: audioFile.name
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    console.error('Transcription error:', error);
+    return new Response(JSON.stringify({
+      error: 'Transcription failed: ' + error.message
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Get call transcript
+router.get('/call/:callSid/transcript', async (request, env) => {
+  const { callSid } = request.params;
+
+  const callDataStr = await env.TRANSCRIPTIONS.get(`call:${callSid}`);
+  if (!callDataStr) {
+    return new Response(JSON.stringify({ error: 'Call not found' }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  const callData = JSON.parse(callDataStr);
+
+  return new Response(JSON.stringify({
+    callSid,
+    ...callData
+  }), {
+    headers: { 'Content-Type': 'application/json' }
+  });
+});
+
+// Get all calls
+router.get('/calls', async (request, env) => {
+  try {
+    // List all call keys from KV
+    const list = await env.TRANSCRIPTIONS.list({ prefix: 'call:' });
+    const calls = [];
+
+    for (const key of list.keys) {
+      const callDataStr = await env.TRANSCRIPTIONS.get(key.name);
+      if (callDataStr) {
+        const callData = JSON.parse(callDataStr);
+        calls.push({
+          callSid: key.name.replace('call:', ''),
+          ...callData
+        });
+      }
+    }
+
+    return new Response(JSON.stringify({ calls }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Health check
+router.get('/health', () => {
+  return new Response(JSON.stringify({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    platform: 'cloudflare-workers'
+  }), {
+    headers: { 'Content-Type': 'application/json' }
+  });
+});
+
+// Azure Speech API transcription function
+async function transcribeWithAzureAPI(audioUrl, env, audioBuffer = null) {
+  try {
+    let finalAudioBuffer;
+
+    if (audioBuffer) {
+      // Audio data already provided (for direct upload)
+      finalAudioBuffer = audioBuffer;
+    } else {
+      // Download audio from URL (for Twilio recordings)
+      const audioResponse = await fetch(audioUrl, {
+        headers: {
+          'Authorization': `Basic ${btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)}`
+        }
+      });
+
+      if (!audioResponse.ok) {
+        throw new Error('Failed to download audio');
+      }
+
+      finalAudioBuffer = await audioResponse.arrayBuffer();
+    }
+
+    // Configure Azure Speech SDK for REST API
+    const speechConfig = speechSdk.SpeechConfig.fromSubscription(env.AZURE_SPEECH_KEY, env.AZURE_SPEECH_REGION);
+    speechConfig.speechRecognitionLanguage = 'en-US';
+    
+    const audioConfig = speechSdk.AudioConfig.fromWavFileInput(new Uint8Array(finalAudioBuffer));
+    const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
+
+    return new Promise((resolve, reject) => {
+      recognizer.recognizeOnceAsync(
+        result => {
+          if (result.reason === speechSdk.ResultReason.RecognizedSpeech) {
+            resolve(result.text || 'No speech detected');
+          } else {
+            reject(new Error(`Recognition failed: ${result.errorDetails}`));
+          }
+          recognizer.close();
+        },
+        error => {
+          reject(new Error(`Recognition error: ${error}`));
+          recognizer.close();
+        }
+      );
+    });
+  } catch (error) {
+    console.error('Azure transcription error:', error);
+    throw error;
+  }
+}
+
+// Durable Object for WebSocket handling
+export class WebSocketHandler {
+  constructor(state, env) {
+    this.state = state;
     this.env = env;
     this.sessions = new Set();
     this.pushStreams = new Map();
@@ -37,7 +334,6 @@ class WebSocketHandler {
     let callSid = null;
     let recognizer = null;
     let pushStream = null;
-    let audioFormat = null;
 
     webSocket.addEventListener('message', async (event) => {
       try {
@@ -47,9 +343,8 @@ class WebSocketHandler {
         switch (message.event) {
           case 'start':
             callSid = message.start.callSid;
-            audioFormat = message.start.mediaFormat;
             this.audioBuffers.set(callSid, []);
-            console.log(`Media stream started: ${callSid}, format: ${JSON.stringify(audioFormat)}`);
+            console.log(`Media stream started: ${callSid}`);
 
             try {
               const result = await this.setupAzureRecognizer(callSid);
@@ -66,17 +361,12 @@ class WebSocketHandler {
           case 'media':
             if (recognizer && pushStream && message.media.payload) {
               try {
-                // Convert Twilio's base64 µ-law audio to PCM
                 const mulawData = Uint8Array.from(atob(message.media.payload), c => c.charCodeAt(0));
                 const pcmData = this.convertMulawToPcm(mulawData);
-                
-                // Create proper WAV format for Azure
                 const wavBuffer = this.createWavChunk(pcmData);
                 
-                // Push to Azure recognizer
                 pushStream.write(wavBuffer);
                 
-                // Log every 10th chunk to avoid spam
                 if (parseInt(message.media.chunk) % 10 === 0) {
                   console.log(`Chunk ${message.media.chunk}: ${mulawData.length} µ-law -> ${pcmData.length} PCM -> ${wavBuffer.length} WAV bytes`);
                 }
@@ -89,7 +379,6 @@ class WebSocketHandler {
           case 'stop':
             console.log(`Call ${callSid} ended`);
             if (pushStream) {
-              // Signal end of audio stream
               pushStream.close();
             }
             if (recognizer) {
@@ -116,6 +405,8 @@ class WebSocketHandler {
   async setupAzureRecognizer(callSid) {
     try {
       console.log(`Setting up Azure recognizer for ${callSid}`);
+      console.log(`Azure Region: ${this.env.AZURE_SPEECH_REGION}`);
+      console.log(`Azure Key exists: ${!!this.env.AZURE_SPEECH_KEY}`);
       
       const speechConfig = speechSdk.SpeechConfig.fromSubscription(this.env.AZURE_SPEECH_KEY, this.env.AZURE_SPEECH_REGION);
       speechConfig.speechRecognitionLanguage = 'en-US';
@@ -297,3 +588,10 @@ class WebSocketHandler {
     });
   }
 }
+
+// Main fetch handler
+export default {
+  async fetch(request, env, ctx) {
+    return router.handle(request, env, ctx);
+  }
+};
