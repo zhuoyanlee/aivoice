@@ -268,8 +268,12 @@ async function transcribeWithAzureAPI(audioUrl, env, audioBuffer = null) {
 
     // Configure Azure Speech SDK for REST API
     const speechConfig = speechSdk.SpeechConfig.fromSubscription(env.AZURE_SPEECH_KEY, env.AZURE_SPEECH_REGION);
-    speechConfig.speechRecognitionLanguage = 'en-US';
-    
+    speechConfig.speechRecognitionLanguage = 'en-AU';
+    speechConfig.setProperty(
+      speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs,
+      "1500" // 1.5 sec pause = end of sentence
+    );
+
     const audioConfig = speechSdk.AudioConfig.fromWavFileInput(new Uint8Array(finalAudioBuffer));
     const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
 
@@ -374,6 +378,7 @@ class WebSocketHandler {
           case 'stop':
             console.log(`Call ${callSid} ended`);
             if (recognizer) {
+              await recognizer.stopContinuousRecognitionAsync();
               await this.cleanupRecognizer(callSid);
               this.audioBuffers.delete(callSid);
             }
@@ -416,12 +421,6 @@ class WebSocketHandler {
       }
     };
   
-    recognizer.recognizing = (s, e) => {
-      if (e.result.reason === speechSdk.ResultReason.RecognizingSpeech) {
-        console.log(`Partial: "${e.result.text}"`);
-      }
-    };
-    
     // 🔹 Finalized sentences
     recognizer.recognized = async (s, e) => {
       if (e.result.reason === speechSdk.ResultReason.RecognizedSpeech) {
