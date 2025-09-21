@@ -179,6 +179,15 @@ export default {
       // Convert base64 to audio buffer
       this.audioBuffer.push(base64Audio);
       
+      console.log(`Audio chunk received, buffer size: ${this.audioBuffer.length}`);
+      
+      // Send acknowledgment that we received the audio
+      this.websocket.send(JSON.stringify({
+        event: 'media_ack',
+        streamSid: this.streamSid,
+        received_chunks: this.audioBuffer.length
+      }));
+      
       // Process audio in chunks to avoid overwhelming the system
       if (this.audioBuffer.length >= 10 && !this.isProcessing) {
         this.isProcessing = true;
@@ -188,20 +197,38 @@ export default {
           const combinedAudio = this.audioBuffer.join('');
           this.audioBuffer = [];
           
-          // Convert μ-law to linear PCM for Gemini
+          console.log('Processing combined audio chunks...');
+          
+          // Convert μ-law to linear PCM for processing
           const pcmAudio = this.convertULawToPCM(combinedAudio);
+          console.log(`Converted to PCM, length: ${pcmAudio.length}`);
           
           // Send to Gemini for processing
           const response = await this.geminiHandler.processAudio(pcmAudio);
           
           if (response) {
+            console.log('Got response from Gemini, converting back to audio...');
             // Convert Gemini's response back to μ-law and send to Twilio
             const ulawResponse = this.convertPCMToULaw(response);
             await this.sendAudioToTwilio(ulawResponse);
+          } else {
+            console.log('No audio response from Gemini (STT/TTS not implemented)');
+            
+            // For testing: send a status update
+            this.websocket.send(JSON.stringify({
+              event: 'processing_complete',
+              streamSid: this.streamSid,
+              message: 'Audio received and processed, but STT/TTS services not implemented'
+            }));
           }
           
         } catch (error) {
           console.error('Audio processing error:', error);
+          this.websocket.send(JSON.stringify({
+            event: 'processing_error',
+            streamSid: this.streamSid,
+            error: error.message
+          }));
         } finally {
           this.isProcessing = false;
         }
@@ -390,6 +417,8 @@ export default {
         
         const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${this.apiKey}`;
         
+        console.log(`calling Gemini API start`);
+
         const requestBody = {
           contents: this.conversationHistory.slice(-6), // Keep last 6 messages for context
           generationConfig: {
@@ -408,6 +437,8 @@ export default {
           body: JSON.stringify(requestBody)
         });
   
+        console.log(`calling Gemini API response ${response.json()}`);
+
         if (!response.ok) {
           const errorText = await response.text();
           console.error(`Gemini API error: ${response.status} - ${errorText}`);
@@ -556,7 +587,6 @@ export default {
   #   { name = "CONVERSATION_STATE", class_name = "ConversationState" }
   # ]
   */
- 
 // Durable Object for WebSocket handling
 export class WebSocketHandler {
     constructor(controller, env) {
