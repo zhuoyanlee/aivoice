@@ -1,8 +1,8 @@
 // ES Modules format for Cloudflare Workers
 import { Router } from 'itty-router';
 import * as speechSdk from 'microsoft-cognitiveservices-speech-sdk';
-import WebSocket from "ws";
-import fetch from "node-fetch";
+import { WebSocketServer, WebSocket } from "ws";
+import http from "node:http";
 
 const router = Router();
 
@@ -23,8 +23,28 @@ router.get('/', () => {
   });
 });
 
+
+// Create HTTP server
+const server = http.createServer();
+
+// Create Twilio WebSocket server
+const twilioWss = new WebSocketServer({ noServer: true });
+
+// Twilio webhook to start stream
+app.post("/webhook/voice", (req, res) => {
+  res.type("text/xml");
+  res.send(`
+    <Response>
+      <Start>
+        <Stream url="wss://${process.env.PUBLIC_HOST}/twilio-stream" />
+      </Start>
+      <Say>Hello! Start talking...</Say>
+    </Response>
+  `);
+});
+
 // Twilio voice webhook - handles incoming calls
-router.post('/webhook/voice', async (request, env) => {
+/*router.post('/webhook/voice', async (request, env) => {
   const formData = await request.formData();
   const callSid = formData.get('CallSid');
   const from = formData.get('From');
@@ -63,56 +83,8 @@ router.post('/webhook/voice', async (request, env) => {
   return new Response(twiml, {
     headers: { 'Content-Type': 'text/xml' }
   });
-});
+});*/
 
-// ================= n8n block=========================
-// WebSocket endpoint for Twilio audio
-const twilioWss = new WebSocket.Server({ noServer: true });
-
-twilioWss.on("connection", async (ws) => {
-  console.log("Twilio stream connected");
-
-  // Connect to Gemini realtime
-  const gemini = new WebSocket("wss://generativelanguage.googleapis.com/v1beta/realtime?key=" + process.env.GEMINI_API_KEY);
-
-  gemini.on("open", () => console.log("Connected to Gemini"));
-
-  ws.on("message", (msg) => {
-    const data = JSON.parse(msg.toString());
-
-    if (data.event === "media") {
-      const audioBase64 = data.media.payload; // PCM base64 from Twilio
-      gemini.send(JSON.stringify({
-        type: "input_audio_buffer.append",
-        audio: audioBase64
-      }));
-    }
-  });
-
-  ws.on("close", () => {
-    gemini.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-  });
-
-  gemini.on("message", (msg) => {
-    const gemEvent = JSON.parse(msg.toString());
-    // Forward transcript to n8n
-    fetch(process.env.N8N_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(gemEvent)
-    });
-  });
-});
-
-// Upgrade HTTP to WS for Twilio stream
-app.server = app.listen(3000);
-app.server.on("upgrade", (req, socket, head) => {
-  if (req.url === "/twilio-stream") {
-    twilioWss.handleUpgrade(req, socket, head, (ws) => {
-      twilioWss.emit("connection", ws, req);
-    });
-  }
-});
 
 // WebSocket endpoint
 router.get('/ws', async (request, env) => {
@@ -649,9 +621,55 @@ class WebSocketHandler {
 
 // Main fetch handler
 export default {
-  async fetch(request, env, ctx) {
-    return router.handle(request, env, ctx);
-  }
+    async fetch(req, env) {
+      console.log(`async fetch ${req} : ${env}`);
+      const upgradeHeader = req.headers.get("Upgrade");
+      if (upgradeHeader !== "websocket") {
+        return new Response("Expected websocket", { status: 426 });
+      }
+  
+      const [client, server] = Object.values(new WebSocketPair());
+  
+      server.accept();
+  
+      server.addEventListener("message", async (event) => {
+        try {
+          const data = JSON.parse(event.data);
+  
+          if (data.event === "media") {
+            const audioBase64 = data.media.payload;
+  
+            // Send to Gemini realtime
+            const gemini = new WebSocket(
+              `wss://generativelanguage.googleapis.com/v1beta/realtime?key=${env.GEMINI_API_KEY}`
+            );
+  
+            gemini.addEventListener("open", () => {
+              gemini.send(
+                JSON.stringify({
+                  type: "input_audio_buffer.append",
+                  audio: audioBase64,
+                })
+              );
+            });
+  
+            gemini.addEventListener("message", async (m) => {
+              await fetch(env.N8N_WEBHOOK_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: m.data,
+              });
+            });
+          }
+        } catch (err) {
+          console.error("Worker error:", err);
+        }
+      });
+  
+      return new Response(null, { status: 101, webSocket: client });
+    },
+ 
+  
 };
 
 // Export the Durable Object class
