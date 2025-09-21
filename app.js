@@ -2,7 +2,6 @@
 import { Router } from 'itty-router';
 import * as speechSdk from 'microsoft-cognitiveservices-speech-sdk';
 import { WebSocketServer, WebSocket } from "ws";
-import http from "node:http";
 
 const router = Router();
 
@@ -24,19 +23,16 @@ router.get('/', () => {
 });
 
 
-// Create HTTP server
-const server = http.createServer();
-
-// Create Twilio WebSocket server
-const twilioWss = new WebSocketServer({ noServer: true });
-
 // Twilio webhook to start stream
-app.post("/webhook/voice", (req, res) => {
+router.post("/webhook/voice", async (req, res) => {
+  
+  const url = new URL(request.url);
+
   res.type("text/xml");
   res.send(`
     <Response>
       <Start>
-        <Stream url="wss://${process.env.PUBLIC_HOST}/twilio-stream" />
+        <Stream url="wss://${url.host}/twilio-stream" />
       </Start>
       <Say>Hello! Start talking...</Say>
     </Response>
