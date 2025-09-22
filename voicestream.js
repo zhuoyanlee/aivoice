@@ -66,7 +66,7 @@ export default {
           return new Response('OK', { status: 200 });
         }
         
-        return new Response('Not Found', { status: 404 });
+        return router.handle(request, env, ctx);
       } catch (error) {
         console.error('Worker fetch error:', error);
         return new Response(`Internal Server Error: ${error.message}`, { status: 500 });
