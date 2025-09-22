@@ -1,6 +1,52 @@
 // Cloudflare Worker for Twilio-Gemini Voice Bridge
+import { Router } from 'itty-router';
+
+
+const router = Router();
+
+// Twilio voice webhook - handles incoming calls
+router.post('/webhook/voice', async (request, env) => {
+    const formData = await request.formData();
+    const callSid = formData.get('CallSid');
+    const from = formData.get('From');
+    const to = formData.get('To');
+    const callStatus = formData.get('CallStatus');
+  
+    console.log(`Incoming call: ${callSid} from ${from} to ${to}, status: ${callStatus}`);
+  
+    // Store call data in KV
+    const callData = {
+      from,
+      to,
+      startTime: new Date().toISOString(),
+      transcriptions: [],
+      realtimeTranscript: '',
+      status: callStatus,
+      isRealTime: true
+    };
+  
+    await env.TRANSCRIPTIONS.put(`call:${callSid}`, JSON.stringify(callData));
+  
+    // Get WebSocket URL for this request
+    const url = new URL(request.url);
+    const wsUrl = `wss://${url.host}/media-stream`;
+  
+    // TwiML response with Media Stream
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+  <Response>
+      <Say>Hello! This is Fong's Kitchen</Say>
+      <Start>
+          <Stream name="realtime-transcription" url="${wsUrl}" />
+      </Start>
+  </Response>`;
+  
+    return new Response(twiml, {
+      headers: { 'Content-Type': 'text/xml' }
+    });
+  });
 
 export default {
+    
     async fetch(request, env, ctx) {
       try {
         const url = new URL(request.url);

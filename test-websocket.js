@@ -23,18 +23,35 @@ ws.on('open', function open() {
   // Send dummy media data after 1 second
   setTimeout(() => {
     ws.send(JSON.stringify({
-      event: "media",
-      sequenceNumber: "1",
-      media: {
-        track: "inbound",
-        chunk: "1",
-        timestamp: Date.now().toString(),
-        payload: Buffer.from("test audio data").toString('base64')
-      },
-      streamSid: "MZ123456789abcdef"
-    }));
+        "event": "media",
+        "sequenceNumber": "3",
+        "media": {
+          "track": "inbound",
+          "chunk": "2",
+          "timestamp": "165",
+          "payload": "0dHQzdDR0M3Qz9DR0c/QzdHQ0NDN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQzdDR0M3QzdHP0NHQz9DN0dDQzdDN0dHQ"
+        },
+        "streamSid": "MZ1234567890abcdef1234567890abcdef"
+      }));
   }, 1000);
   
+  
+  // Send dummy media data after 1 second
+  setTimeout(() => {
+    ws.send(JSON.stringify({
+        "event": "media",
+        "sequenceNumber": "4",
+        "media": {
+          "track": "inbound",
+          "chunk": "3",
+          "timestamp": "325",
+          "payload": "pqaioaOlpaWmpaOjoKajo6alo6Ojo6OkpKSko6KjpKOkpKOjoqOjpKOkpKOjoqOjo6SjpKSjo6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Ojo6OkpKSko6KjpKOko6OjoqOjpKOkpKOjoqOjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSjo6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6OjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kjo6OkpKSko6Kjo6Oko6SjpKOio6OjpKOkpKSjo6Kj"
+        },
+        "streamSid": "MZ1234567890abcdef1234567890abcdef"
+      }));
+  }, 1000);
+  
+
   // Send stop message after 5 seconds
   setTimeout(() => {
     ws.send(JSON.stringify({
