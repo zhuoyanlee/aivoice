@@ -143,8 +143,10 @@ export default {
             
             // Send acknowledgment
             this.websocket.send(JSON.stringify({
-              event: 'ack',
-              streamSid: this.streamSid
+              event: 'stream_started',
+              streamSid: this.streamSid,
+              status: 'ready',
+              message: 'AI assistant is ready to receive audio'
             }));
             break;
   
@@ -160,17 +162,63 @@ export default {
   
           case 'stop':
             console.log('Stream stopped');
+            
+            // Send stop acknowledgment
+            this.websocket.send(JSON.stringify({
+              event: 'stream_stopped',
+              streamSid: this.streamSid,
+              message: 'Stream ended successfully',
+              total_chunks_processed: this.audioBuffer.length
+            }));
+            
             this.cleanup();
+            break;
+            
+          case 'test':
+            // Test message for debugging
+            console.log('Test message received');
+            this.websocket.send(JSON.stringify({
+              event: 'test_response',
+              message: 'WebSocket connection is working!',
+              timestamp: new Date().toISOString()
+            }));
+            break;
+            
+          case 'text_test':
+            // Test Gemini API with text input (bypass STT/TTS)
+            if (message.text) {
+              console.log('Testing Gemini API with text:', message.text);
+              try {
+                const response = await this.geminiHandler.processText(message.text);
+                this.websocket.send(JSON.stringify({
+                  event: 'text_response',
+                  input: message.text,
+                  response: response,
+                  timestamp: new Date().toISOString()
+                }));
+              } catch (error) {
+                this.websocket.send(JSON.stringify({
+                  event: 'text_error',
+                  error: error.message
+                }));
+              }
+            }
             break;
             
           default:
             console.log('Unknown message event:', message.event);
+            this.websocket.send(JSON.stringify({
+              event: 'unknown_event',
+              received_event: message.event,
+              message: 'Event type not recognized but connection is working'
+            }));
         }
       } catch (error) {
         console.error('Error handling message:', error);
         this.websocket.send(JSON.stringify({
           event: 'error',
-          error: error.message
+          error: error.message,
+          stack: error.stack
         }));
       }
     }
@@ -417,8 +465,6 @@ export default {
         
         const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${this.apiKey}`;
         
-        console.log(`calling Gemini API start`);
-
         const requestBody = {
           contents: this.conversationHistory.slice(-6), // Keep last 6 messages for context
           generationConfig: {
@@ -437,8 +483,6 @@ export default {
           body: JSON.stringify(requestBody)
         });
   
-        console.log(`calling Gemini API response ${response.json()}`);
-
         if (!response.ok) {
           const errorText = await response.text();
           console.error(`Gemini API error: ${response.status} - ${errorText}`);
@@ -469,47 +513,69 @@ export default {
       }
     }
   
-    async speechToText(audioBase64) {
-      // Placeholder for speech-to-text conversion
-      // You'll need to implement this using a service like:
-      // - Google Cloud Speech-to-Text
-      // - OpenAI Whisper API
-      // - Assembly AI
-      // - Azure Speech Services
-      
-      // For now, return a placeholder
-      console.log('Audio received for transcription (length:', audioBase64.length, ')');
-      
-      // Example implementation with Google Speech-to-Text:
-      /*
+    async processText(text) {
       try {
-        const response = await fetch(`https://speech.googleapis.com/v1/speech:recognize?key=${this.env.GOOGLE_API_KEY}`, {
+        if (!this.apiKey) {
+          return "Error: GEMINI_API_KEY not configured";
+        }
+        
+        await this.initialize();
+        
+        // Add user message to conversation history
+        this.conversationHistory.push({
+          role: 'user',
+          parts: [{ text: text }]
+        });
+        
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${this.apiKey}`;
+        
+        const requestBody = {
+          contents: this.conversationHistory.slice(-6), // Keep last 6 messages for context
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 150,
+            topK: 40,
+            topP: 0.95,
+          }
+        };
+  
+        console.log('Calling Gemini API...');
+        const response = await fetch(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            config: {
-              encoding: 'LINEAR16',
-              sampleRateHertz: 8000,
-              languageCode: 'en-US',
-            },
-            audio: {
-              content: audioBase64
-            }
-          })
+          body: JSON.stringify(requestBody)
         });
-        
+  
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`Gemini API error: ${response.status} - ${errorText}`);
+          return `API Error: ${response.status} - ${errorText}`;
+        }
+  
         const data = await response.json();
-        return data.results?.[0]?.alternatives?.[0]?.transcript || null;
+        
+        if (data.candidates && data.candidates[0] && data.candidates[0].content) {
+          const responseText = data.candidates[0].content.parts[0].text;
+          
+          // Add AI response to conversation history
+          this.conversationHistory.push({
+            role: 'model',
+            parts: [{ text: responseText }]
+          });
+          
+          console.log('Gemini Response:', responseText);
+          return responseText;
+        }
+        
+        return "No response from Gemini API";
       } catch (error) {
-        console.error('Speech-to-text error:', error);
-        return null;
+        console.error('Gemini text processing error:', error);
+        return `Error: ${error.message}`;
       }
-      */
-      
-      return null; // Return null for now - implement STT service
     }
+      
   
     async textToSpeech(text) {
       // Placeholder for Text-to-Speech conversion
