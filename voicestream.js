@@ -272,16 +272,23 @@ export default {
     }
   
     async processAudioChunk(base64Audio) {
+      // Validate input
+      if (!base64Audio || typeof base64Audio !== 'string') {
+        console.warn('Invalid audio chunk received');
+        return;
+      }
+      
       // Convert base64 to audio buffer
       this.audioBuffer.push(base64Audio);
       
-      console.log(`Audio chunk received, buffer size: ${this.audioBuffer.length}`);
+      console.log(`Audio chunk received, buffer size: ${this.audioBuffer.length}, chunk length: ${base64Audio.length}`);
       
       // Send acknowledgment that we received the audio
       this.websocket.send(JSON.stringify({
         event: 'media_ack',
         streamSid: this.streamSid,
-        received_chunks: this.audioBuffer.length
+        received_chunks: this.audioBuffer.length,
+        chunk_length: base64Audio.length
       }));
       
       // Process audio in chunks to avoid overwhelming the system
@@ -289,14 +296,30 @@ export default {
         this.isProcessing = true;
         
         try {
-          // Combine audio chunks
-          const combinedAudio = this.audioBuffer.join('');
+          // Combine audio chunks with validation
+          const validChunks = this.audioBuffer.filter(chunk => 
+            chunk && typeof chunk === 'string' && chunk.length > 0
+          );
+          
+          if (validChunks.length === 0) {
+            console.warn('No valid audio chunks to process');
+            this.audioBuffer = [];
+            return;
+          }
+          
+          const combinedAudio = validChunks.join('');
           this.audioBuffer = [];
           
-          console.log('Processing combined audio chunks...');
+          console.log('Processing combined audio chunks, total length:', combinedAudio.length);
           
           // Convert μ-law to linear PCM for processing
           const pcmAudio = this.convertULawToPCM(combinedAudio);
+          
+          if (pcmAudio.length === 0) {
+            console.warn('PCM conversion resulted in empty data');
+            return;
+          }
+          
           console.log(`Converted to PCM, length: ${pcmAudio.length}`);
           
           // Send to Gemini for processing
@@ -306,7 +329,9 @@ export default {
             console.log('Got response from Gemini, converting back to audio...');
             // Convert Gemini's response back to μ-law and send to Twilio
             const ulawResponse = this.convertPCMToULaw(response);
-            await this.sendAudioToTwilio(ulawResponse);
+            if (ulawResponse) {
+              await this.sendAudioToTwilio(ulawResponse);
+            }
           } else {
             console.log('No audio response from Gemini (STT/TTS not implemented)');
             
@@ -314,7 +339,8 @@ export default {
             this.websocket.send(JSON.stringify({
               event: 'processing_complete',
               streamSid: this.streamSid,
-              message: 'Audio received and processed, but STT/TTS services not implemented'
+              message: 'Audio received and processed successfully',
+              pcm_samples: pcmAudio.length
             }));
           }
           
@@ -323,7 +349,8 @@ export default {
           this.websocket.send(JSON.stringify({
             event: 'processing_error',
             streamSid: this.streamSid,
-            error: error.message
+            error: error.message,
+            error_type: error.constructor.name
           }));
         } finally {
           this.isProcessing = false;
@@ -332,17 +359,46 @@ export default {
     }
   
     convertULawToPCM(base64ULaw) {
-      // Convert base64 μ-law to ArrayBuffer
-      const ulawData = Uint8Array.from(atob(base64ULaw), c => c.charCodeAt(0));
-      
-      // μ-law to linear PCM conversion table
-      const pcmData = new Int16Array(ulawData.length);
-      
-      for (let i = 0; i < ulawData.length; i++) {
-        pcmData[i] = this.ulawToPcm(ulawData[i]);
+      try {
+        // Validate and clean base64 data
+        if (!base64ULaw || typeof base64ULaw !== 'string') {
+          console.warn('Invalid base64 input: not a string');
+          return new Int16Array(0);
+        }
+        
+        // Clean the base64 string - remove any invalid characters
+        const cleanBase64 = base64ULaw.replace(/[^A-Za-z0-9+/=]/g, '');
+        
+        // Validate base64 format
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(cleanBase64)) {
+          console.warn('Invalid base64 format detected');
+          return new Int16Array(0);
+        }
+        
+        // Ensure proper padding
+        let paddedBase64 = cleanBase64;
+        while (paddedBase64.length % 4 !== 0) {
+          paddedBase64 += '=';
+        }
+        
+        // Convert base64 μ-law to ArrayBuffer
+        const ulawData = Uint8Array.from(atob(paddedBase64), c => c.charCodeAt(0));
+        
+        // μ-law to linear PCM conversion
+        const pcmData = new Int16Array(ulawData.length);
+        
+        for (let i = 0; i < ulawData.length; i++) {
+          pcmData[i] = this.ulawToPcm(ulawData[i]);
+        }
+        
+        return pcmData;
+        
+      } catch (error) {
+        console.error('Base64 conversion error:', error);
+        console.log('Problematic base64 data length:', base64ULaw?.length);
+        console.log('First 50 chars:', base64ULaw?.substring(0, 50));
+        return new Int16Array(0);
       }
-      
-      return pcmData;
     }
   
     ulawToPcm(ulaw) {
@@ -363,13 +419,24 @@ export default {
     }
   
     convertPCMToULaw(pcmData) {
-      const ulawData = new Uint8Array(pcmData.length);
-      
-      for (let i = 0; i < pcmData.length; i++) {
-        ulawData[i] = this.pcmToUlaw(pcmData[i]);
+      try {
+        if (!pcmData || pcmData.length === 0) {
+          console.warn('No PCM data to convert');
+          return '';
+        }
+        
+        const ulawData = new Uint8Array(pcmData.length);
+        
+        for (let i = 0; i < pcmData.length; i++) {
+          ulawData[i] = this.pcmToUlaw(pcmData[i]);
+        }
+        
+        return btoa(String.fromCharCode(...ulawData));
+        
+      } catch (error) {
+        console.error('PCM to μ-law conversion error:', error);
+        return '';
       }
-      
-      return btoa(String.fromCharCode(...ulawData));
     }
   
     pcmToUlaw(pcm) {
