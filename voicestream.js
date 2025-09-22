@@ -34,11 +34,13 @@ router.post('/webhook/voice', async (request, env) => {
     // TwiML response with Media Stream
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
   <Response>
-      <Say>Hello! This is Fong's Kitchen</Say>
-      <Start>
-          <Stream name="realtime-transcription" url="${wsUrl}" />
-      </Start>
-  </Response>`;
+        <Say>Hello! I'm connecting you to an AI assistant. Please wait a moment.</Say>
+        <Start>
+          <Stream url="${wsUrl}" />
+        </Start>
+        <Say>You are now connected. Please speak.</Say>
+        <Pause length="60"/>
+      </Response>`;
   
     return new Response(twiml, {
       headers: { 'Content-Type': 'text/xml' }
