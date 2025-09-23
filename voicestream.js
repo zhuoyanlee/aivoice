@@ -301,91 +301,30 @@ export default {
         
         // Process audio in smaller chunks initially for testing
         if (this.audioBuffer.length >= 5 && !this.isProcessing) {
-          this.isProcessing = true;
-          
-          try {
-            // Take only the first few chunks to avoid overwhelming
-            const chunksToProcess = this.audioBuffer.splice(0, 5);
+            this.isProcessing = true;
             
-            // Log details about what we're processing
-            console.log(`Processing ${chunksToProcess.length} audio chunks:`);
-            chunksToProcess.forEach((chunk, i) => {
-              console.log(`  Chunk ${i}: length=${chunk.length}, sample="${chunk.substring(0, 10)}..."`);
-            });
-            
-            // Test each chunk individually first
-            const validChunks = [];
-            for (let i = 0; i < chunksToProcess.length; i++) {
-              const chunk = chunksToProcess[i];
-              if (chunk && typeof chunk === 'string' && chunk.length > 0) {
-                // Try to decode this chunk to see if it's valid
-                try {
-                  const testPcm = this.convertULawToPCM(chunk);
-                  if (testPcm.length > 0) {
-                    validChunks.push(chunk);
-                    console.log(`  ✓ Chunk ${i} valid: ${testPcm.length} PCM samples`);
-                  } else {
-                    console.log(`  ✗ Chunk ${i} invalid: no PCM data generated`);
-                  }
-                } catch (chunkError) {
-                  console.log(`  ✗ Chunk ${i} error:`, chunkError.message);
-                }
-              } else {
-                console.log(`  ✗ Chunk ${i} invalid: bad format`);
-              }
+            try {
+                const chunksToProcess = this.audioBuffer.splice(0, 5);
+                console.log(`Processing ${chunksToProcess.length} audio chunks`);
+                
+                // Option 1: Send raw μ-law data directly to transcription
+                // Combine all base64 chunks
+                const combinedBase64 = chunksToProcess.join('');
+                
+                // Send directly to transcription (it will handle the conversion)
+                const response = await this.geminiHandler.processRawAudio(combinedBase64);
+                
+                this.websocket.send(JSON.stringify({
+                    event: 'transcription_complete',
+                    streamSid: this.streamSid,
+                    transcription: response
+                }));
+                
+            } catch (error) {
+                console.error('Audio processing error:', error);
+            } finally {
+                this.isProcessing = false;
             }
-            
-            if (validChunks.length === 0) {
-              console.warn('No valid audio chunks to process');
-              this.websocket.send(JSON.stringify({
-                event: 'processing_error',
-                streamSid: this.streamSid,
-                error: 'No valid base64 audio chunks found',
-                total_chunks: chunksToProcess.length
-              }));
-              return;
-            }
-            
-            console.log(`Found ${validChunks.length} valid chunks out of ${chunksToProcess.length}`);
-            
-            // Process the first valid chunk only for now
-            const firstValidChunk = validChunks[0];
-            console.log('Processing first valid chunk...');
-            
-            const pcmAudio = this.convertULawToPCM(firstValidChunk);
-            
-            if (pcmAudio.length === 0) {
-              console.warn('PCM conversion resulted in empty data');
-              return;
-            }
-            
-            console.log(`Successfully converted to PCM: ${pcmAudio.length} samples`);
-            
-            // Send success response
-            this.websocket.send(JSON.stringify({
-              event: 'processing_complete',
-              streamSid: this.streamSid,
-              message: 'Audio chunk processed successfully',
-              pcm_samples: pcmAudio.length,
-              valid_chunks: validChunks.length,
-              total_chunks: chunksToProcess.length
-            }));
-            
-            // TODO: Send to Gemini for processing
-            const response = await this.geminiHandler.processAudio(pcmAudio);
-            
-          } catch (error) {
-            console.error('Audio processing error:', error);
-            this.websocket.send(JSON.stringify({
-              event: 'processing_error',
-              streamSid: this.streamSid,
-              error: error.message,
-              error_type: error.constructor.name,
-              stack: error.stack?.substring(0, 200)
-            }));
-          } finally {
-            this.isProcessing = false;
-          }
         }
       }
     
@@ -710,99 +649,97 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
       throw error;
     }
   }
-  // Helper to convert μ-law WAV to 16-bit PCM WAV
- // Helper to convert μ-law WAV to 16-bit PCM WAV
- convertMuLawToPcmWav(inputBuffer) {
-    // Normalize to ArrayBuffer if it's a Uint8Array or other TypedArray
-    if (inputBuffer instanceof Uint8Array || 
-        inputBuffer instanceof Int8Array ||
-        inputBuffer instanceof Uint16Array ||
-        inputBuffer instanceof Int16Array ||
-        inputBuffer instanceof Uint32Array ||
-        inputBuffer instanceof Int32Array) {
-      inputBuffer = inputBuffer.buffer.slice(inputBuffer.byteOffset, inputBuffer.byteOffset + inputBuffer.byteLength);
-    } else if (!(inputBuffer instanceof ArrayBuffer)) {
-      throw new Error('Input buffer must be an ArrayBuffer or TypedArray');
+  // Process raw μ-law audio from Twilio
+  async processRawAudio(base64MuLawAudio) {
+    try {
+        console.log('Processing raw μ-law audio, length:', base64MuLawAudio.length);
+        
+        // Create a proper μ-law WAV file from the raw data
+        const wavBuffer = this.createMuLawWav(base64MuLawAudio);
+        
+        // Send to Azure for transcription
+        const transcription = await this.transcribeWithAzureRESTAPI(wavBuffer);
+        console.log('Transcription result:', transcription);
+        
+        if (transcription && transcription.trim()) {
+            // Process with Gemini
+            const aiResponse = await this.processText(transcription);
+            return aiResponse;
+        }
+        
+        return "No speech detected";
+        
+    } catch (error) {
+        console.error('Raw audio processing error:', error);
+        return "Audio processing failed";
     }
-  
-    const view = new DataView(inputBuffer);
-    
-    // Parse original WAV header (assuming standard RIFF WAV structure)
-    const riff = view.getUint32(0, true); // 'RIFF'
-    if (riff !== 0x46464952) throw new Error('Not a valid WAV file');
-    
-    const fileSize = view.getUint32(4, true) + 8;
-    const wave = view.getUint32(8, true); // 'WAVE'
-    const fmt = view.getUint32(12, true); // 'fmt '
-    const fmtSize = view.getUint32(16, true);
-    const audioFormat = view.getUint16(20, true); // Should be 7 for μ-law
-    if (audioFormat !== 7) throw new Error('Input is not μ-law (expected format 7)');
-    
-    const channels = view.getUint16(22, true); // 1 for mono
-    const sampleRate = view.getUint32(24, true); // 8000 Hz
-    const byteRate = view.getUint32(28, true);
-    const blockAlign = view.getUint16(32, true);
-    const bitsPerSample = view.getUint16(34, true); // 8 for μ-law
-    
-    // Find 'data' chunk
-    let offset = 36 + fmtSize - 16; // Skip fmt chunk
-    while (view.getUint32(offset, true) !== 0x61746164) { // 'data'
-      offset += view.getUint32(offset + 4, true) + 8;
-    }
-    const dataSize = view.getUint32(offset + 4, true);
-    const dataStart = offset + 8;
-    
-    // Decode μ-law to 16-bit PCM
-    const pcmData = new Int16Array(dataSize);
-    const inputBytes = new Uint8Array(inputBuffer); // Use Uint8Array for byte access
-    for (let i = 0; i < dataSize; i++) {
-      const mu = inputBytes[dataStart + i] ^ 0xFF; // Invert bits
-      const sign = (mu & 0x80) ? -1 : 1;
-      const exponent = (mu >> 4) & 0x07;
-      const mantissa = mu & 0x0F;
-      const sample = sign * ((1 << 11) + (mantissa << 7) + (1 << 6)) >> (7 - exponent);
-      pcmData[i] = Math.min(32767, Math.max(-32768, sample));
-    }
-    
-    // Create new PCM WAV header
-    const newFileSize = 44 + pcmData.byteLength - 8; // Header + data
-    const newByteRate = sampleRate * channels * 2; // 16-bit
-    const newBlockAlign = channels * 2;
-    const outputBuffer = new ArrayBuffer(44 + pcmData.byteLength);
-    const outputView = new DataView(outputBuffer);
-    
-    // RIFF header
-    outputView.setUint32(0, 0x46464952, true); // 'RIFF'
-    outputView.setUint32(4, newFileSize, true);
-    outputView.setUint32(8, 0x45564157, true); // 'WAVE'
-    
-    // fmt chunk
-    outputView.setUint32(12, 0x20746D66, true); // 'fmt '
-    outputView.setUint32(16, 16, true); // fmt size
-    outputView.setUint16(20, 1, true); // PCM format (1)
-    outputView.setUint16(22, channels, true);
-    outputView.setUint32(24, sampleRate, true);
-    outputView.setUint32(28, newByteRate, true);
-    outputView.setUint16(32, newBlockAlign, true);
-    outputView.setUint16(34, 16, true); // 16 bits
-    
-    // data chunk
-    outputView.setUint32(36, 0x61746164, true); // 'data'
-    outputView.setUint32(40, pcmData.byteLength, true);
-    
-    // Copy PCM data
-    new Uint8Array(outputBuffer, 44).set(new Uint8Array(pcmData.buffer));
-    
-    return outputBuffer;
 }
 
-  // Alternative: Use Azure Speech REST API with proper URL construction
+// Create a proper μ-law WAV file from base64 μ-law data
+createMuLawWav(base64MuLawData) {
+    try {
+        // Decode base64 to get raw μ-law bytes
+        const binaryString = atob(base64MuLawData);
+        const muLawBytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            muLawBytes[i] = binaryString.charCodeAt(i);
+        }
+        
+        console.log('Decoded μ-law data, size:', muLawBytes.length);
+        
+        // Create WAV header for μ-law format
+        const sampleRate = 8000;
+        const channels = 1;
+        const bitsPerSample = 8;
+        const byteRate = sampleRate * channels * (bitsPerSample / 8);
+        const blockAlign = channels * (bitsPerSample / 8);
+        const dataSize = muLawBytes.length;
+        const fileSize = 44 + dataSize - 8;
+        
+        const wavBuffer = new ArrayBuffer(44 + dataSize);
+        const view = new DataView(wavBuffer);
+        
+        // RIFF header
+        view.setUint32(0, 0x46464952, true); // 'RIFF'
+        view.setUint32(4, fileSize, true);
+        view.setUint32(8, 0x45564157, true); // 'WAVE'
+        
+        // fmt chunk
+        view.setUint32(12, 0x20746D66, true); // 'fmt '
+        view.setUint32(16, 16, true); // fmt chunk size
+        view.setUint16(20, 7, true); // μ-law format (7)
+        view.setUint16(22, channels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, byteRate, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, bitsPerSample, true);
+        
+        // data chunk
+        view.setUint32(36, 0x61746164, true); // 'data'
+        view.setUint32(40, dataSize, true);
+        
+        // Copy μ-law data
+        new Uint8Array(wavBuffer, 44).set(muLawBytes);
+        
+        console.log('Created μ-law WAV file, total size:', wavBuffer.byteLength);
+        return wavBuffer;
+        
+    } catch (error) {
+        console.error('Error creating μ-law WAV:', error);
+        throw error;
+    }
+}
+
+// Updated transcription method that works with the corrected input
 async transcribeWithAzureRESTAPI(audioBuffer) {
     try {
-        // Convert audio if needed
+        console.log('=== Azure Transcription ===');
+        console.log('Input buffer size:', audioBuffer.byteLength);
+        
+        // The buffer should now be a proper μ-law WAV file
+        // Convert it to PCM for Azure (Azure expects PCM, not μ-law)
         const pcmBuffer = this.convertMuLawToPcmWav(audioBuffer);
-
-        // Construct the request URL with parameters
+        
         const baseUrl = `https://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`;
         const params = new URLSearchParams({
             'language': 'en-AU',
@@ -811,37 +748,33 @@ async transcribeWithAzureRESTAPI(audioBuffer) {
         });
         
         const url = `${baseUrl}?${params.toString()}`;
-
-        // Make the request
+        
         const response = await fetch(url, {
             method: 'POST',
             headers: {
                 'Ocp-Apim-Subscription-Key': this.env.AZURE_SPEECH_KEY,
                 'Content-Type': 'audio/wav; codecs=audio/pcm; samplerate=8000',
-                'Accept': 'application/json;text/xml'
+                'Accept': 'application/json'
             },
             body: pcmBuffer
         });
-
+        
         if (!response.ok) {
             const errorText = await response.text();
-            console.error('Azure API Error Response:', errorText);
             throw new Error(`Azure Speech API error: ${response.status} - ${errorText}`);
         }
-
+        
         const result = await response.json();
-        console.log('Azure Speech Result:', result);
+        console.log('Azure result:', result);
         
         if (result.RecognitionStatus === 'Success' && result.DisplayText) {
             return result.DisplayText.trim();
-        } else if (result.RecognitionStatus === 'NoMatch') {
-            return 'No speech detected';
         } else {
-            throw new Error(`Recognition failed: ${result.RecognitionStatus}`);
+            return 'No speech detected';
         }
-
+        
     } catch (error) {
-        console.error('Azure REST transcription error:', error);
+        console.error('Azure transcription error:', error);
         throw error;
     }
 }
