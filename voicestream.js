@@ -372,7 +372,7 @@ export default {
             }));
             
             // TODO: Send to Gemini for processing
-            // const response = await this.geminiHandler.processAudio(pcmAudio);
+            const response = await this.geminiHandler.processAudio(pcmAudio);
             
           } catch (error) {
             console.error('Audio processing error:', error);
