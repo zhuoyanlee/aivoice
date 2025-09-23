@@ -673,6 +673,11 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
         // Audio data already provided (for direct upload)
         finalAudioBuffer = audioBuffer;
       } 
+
+      // Convert Twilio μ-law WAV to PCM WAV
+        const pcmBuffer = this.convertMuLawToPcmWav(finalAudioBuffer);
+
+
       // Configure Azure Speech SDK for REST API
       const speechConfig = speechSdk.SpeechConfig.fromSubscription(this.env.AZURE_SPEECH_KEY, this.env.AZURE_SPEECH_REGION);
       speechConfig.speechRecognitionLanguage = 'en-AU';
@@ -681,7 +686,7 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
         "1500" // 1.5 sec pause = end of sentence
       );
   
-      const audioConfig = speechSdk.AudioConfig.fromWavFileInput(new Uint8Array(finalAudioBuffer));
+      const audioConfig = speechSdk.AudioConfig.fromWavFileInput(new Uint8Array(pcmBuffer));
       const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
   
       return new Promise((resolve, reject) => {
@@ -705,7 +710,77 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
       throw error;
     }
   }
-  
+  // Helper to convert μ-law WAV to 16-bit PCM WAV
+ convertMuLawToPcmWav(inputBuffer) {
+    const view = new DataView(inputBuffer);
+    
+    // Parse original WAV header (assuming standard RIFF WAV structure)
+    const riff = view.getUint32(0, true); // 'RIFF'
+    if (riff !== 0x46464952) throw new Error('Not a valid WAV file');
+    
+    const fileSize = view.getUint32(4, true) + 8;
+    const wave = view.getUint32(8, true); // 'WAVE'
+    const fmt = view.getUint32(12, true); // 'fmt '
+    const fmtSize = view.getUint32(16, true);
+    const audioFormat = view.getUint16(20, true); // Should be 7 for μ-law
+    if (audioFormat !== 7) throw new Error('Input is not μ-law (expected format 7)');
+    
+    const channels = view.getUint16(22, true); // 1 for mono
+    const sampleRate = view.getUint32(24, true); // 8000 Hz
+    const byteRate = view.getUint32(28, true);
+    const blockAlign = view.getUint16(32, true);
+    const bitsPerSample = view.getUint16(34, true); // 8 for μ-law
+    
+    // Find 'data' chunk
+    let offset = 36 + fmtSize - 16; // Skip fmt chunk
+    while (view.getUint32(offset, true) !== 0x61746164) { // 'data'
+      offset += view.getUint32(offset + 4, true) + 8;
+    }
+    const dataSize = view.getUint32(offset + 4, true);
+    const dataStart = offset + 8;
+    
+    // Decode μ-law to 16-bit PCM
+    const pcmData = new Int16Array(dataSize);
+    for (let i = 0; i < dataSize; i++) {
+      const mu = new Uint8Array(inputBuffer)[dataStart + i] ^ 0xFF; // Invert bits
+      const sign = (mu & 0x80) ? -1 : 1;
+      const exponent = (mu >> 4) & 0x07;
+      const mantissa = mu & 0x0F;
+      const sample = sign * ((1 << 11) + (mantissa << 7) + (1 << 6)) >> (7 - exponent);
+      pcmData[i] = Math.min(32767, Math.max(-32768, sample));
+    }
+    
+    // Create new PCM WAV header
+    const newFileSize = 44 + pcmData.byteLength - 8; // Header + data
+    const newByteRate = sampleRate * channels * 2; // 16-bit
+    const newBlockAlign = channels * 2;
+    const outputBuffer = new ArrayBuffer(44 + pcmData.byteLength);
+    const outputView = new DataView(outputBuffer);
+    
+    // RIFF header
+    outputView.setUint32(0, 0x46464952, true); // 'RIFF'
+    outputView.setUint32(4, newFileSize, true);
+    outputView.setUint32(8, 0x45564157, true); // 'WAVE'
+    
+    // fmt chunk
+    outputView.setUint32(12, 0x20746D66, true); // 'fmt '
+    outputView.setUint32(16, 16, true); // fmt size
+    outputView.setUint16(20, 1, true); // PCM format (1)
+    outputView.setUint16(22, channels, true);
+    outputView.setUint32(24, sampleRate, true);
+    outputView.setUint32(28, newByteRate, true);
+    outputView.setUint16(32, newBlockAlign, true);
+    outputView.setUint16(34, 16, true); // 16 bits
+    
+    // data chunk
+    outputView.setUint32(36, 0x61746164, true); // 'data'
+    outputView.setUint32(40, pcmData.byteLength, true);
+    
+    // Copy PCM data
+    new Uint8Array(outputBuffer, 44).set(new Uint8Array(pcmData.buffer));
+    
+    return outputBuffer;
+  }
     async callGeminiAPI(audioBase64) {
       // Note: Current Gemini API doesn't support direct audio input
       // This is a conceptual implementation - you'll need to use STT first
