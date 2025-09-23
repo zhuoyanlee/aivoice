@@ -35,11 +35,11 @@ router.post('/webhook/voice', async (request, env) => {
     // TwiML response with Media Stream
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
   <Response>
-        <Say>Hello! I'm connecting you to an AI assistant. Please wait a moment.</Say>
+        <Say>Hello!</Say>
         <Start>
           <Stream url="${wsUrl}" />
         </Start>
-        <Say>You are now connected. Please speak.</Say>
+        <Say>speak.</Say>
         <Pause length="60"/>
       </Response>`;
   
@@ -720,7 +720,7 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
         // Placeholder for speech-to-text conversion
         // const transcribedText = await this.speechToText(audioBase64);
         // Transcribe using audio buffer
-        const transcribedText = await transcribeWithAzureAPI(null, audioBase64);
+        const transcribedText = await this.transcribeWithAzureAPI(null, audioBase64);
 
         console.log(`transcribed text: ${transcribedText}`);
 
