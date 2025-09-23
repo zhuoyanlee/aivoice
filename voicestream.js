@@ -712,12 +712,17 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
   }
   // Helper to convert μ-law WAV to 16-bit PCM WAV
  // Helper to convert μ-law WAV to 16-bit PCM WAV
-convertMuLawToPcmWav(inputBuffer) {
-    // Normalize to ArrayBuffer if it's a Buffer or TypedArray
-    if (inputBuffer instanceof Buffer || inputBuffer instanceof Uint8Array) {
-      inputBuffer = inputBuffer.buffer;
+ convertMuLawToPcmWav(inputBuffer) {
+    // Normalize to ArrayBuffer if it's a Uint8Array or other TypedArray
+    if (inputBuffer instanceof Uint8Array || 
+        inputBuffer instanceof Int8Array ||
+        inputBuffer instanceof Uint16Array ||
+        inputBuffer instanceof Int16Array ||
+        inputBuffer instanceof Uint32Array ||
+        inputBuffer instanceof Int32Array) {
+      inputBuffer = inputBuffer.buffer.slice(inputBuffer.byteOffset, inputBuffer.byteOffset + inputBuffer.byteLength);
     } else if (!(inputBuffer instanceof ArrayBuffer)) {
-      throw new Error('Input buffer must be an ArrayBuffer, Buffer, or Uint8Array');
+      throw new Error('Input buffer must be an ArrayBuffer or TypedArray');
     }
   
     const view = new DataView(inputBuffer);
@@ -789,7 +794,57 @@ convertMuLawToPcmWav(inputBuffer) {
     new Uint8Array(outputBuffer, 44).set(new Uint8Array(pcmData.buffer));
     
     return outputBuffer;
-  }
+}
+
+  // Alternative: Use Azure Speech REST API with proper URL construction
+async transcribeWithAzureRESTAPI(audioBuffer) {
+    try {
+        // Convert audio if needed
+        const pcmBuffer = this.convertMuLawToPcmWav(audioBuffer);
+
+        // Construct the request URL with parameters
+        const baseUrl = `https://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`;
+        const params = new URLSearchParams({
+            'language': 'en-AU',
+            'format': 'detailed',
+            'profanity': 'raw'
+        });
+        
+        const url = `${baseUrl}?${params.toString()}`;
+
+        // Make the request
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Ocp-Apim-Subscription-Key': this.env.AZURE_SPEECH_KEY,
+                'Content-Type': 'audio/wav; codecs=audio/pcm; samplerate=8000',
+                'Accept': 'application/json;text/xml'
+            },
+            body: pcmBuffer
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Azure API Error Response:', errorText);
+            throw new Error(`Azure Speech API error: ${response.status} - ${errorText}`);
+        }
+
+        const result = await response.json();
+        console.log('Azure Speech Result:', result);
+        
+        if (result.RecognitionStatus === 'Success' && result.DisplayText) {
+            return result.DisplayText.trim();
+        } else if (result.RecognitionStatus === 'NoMatch') {
+            return 'No speech detected';
+        } else {
+            throw new Error(`Recognition failed: ${result.RecognitionStatus}`);
+        }
+
+    } catch (error) {
+        console.error('Azure REST transcription error:', error);
+        throw error;
+    }
+}
     async callGeminiAPI(audioBase64) {
       // Note: Current Gemini API doesn't support direct audio input
       // This is a conceptual implementation - you'll need to use STT first
@@ -804,7 +859,7 @@ convertMuLawToPcmWav(inputBuffer) {
         // Placeholder for speech-to-text conversion
         // const transcribedText = await this.speechToText(audioBase64);
         // Transcribe using audio buffer
-        const transcribedText = await this.transcribeWithAzureAPI(null, audioBase64);
+        const transcribedText = await this.transcribeWithAzureRESTAPI(audioBase64);
 
         console.log(`transcribed text: ${transcribedText}`);
 
