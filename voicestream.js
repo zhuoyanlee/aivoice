@@ -1,6 +1,7 @@
 // Cloudflare Worker for Twilio-Gemini Voice Bridge
 import { Router } from 'itty-router';
 
+import * as speechSdk from 'microsoft-cognitiveservices-speech-sdk';
 
 const router = Router();
 
@@ -507,6 +508,8 @@ export default {
         });
         
         this.isInitialized = true;
+
+        await this.setupAzureRecognizer();
         console.log('Gemini handler initialized');
       } catch (error) {
         console.error('Failed to initialize Gemini handler:', error);
@@ -555,6 +558,100 @@ export default {
       
       return pcmData;
     }
+    
+    async callN8nAPI(audioBase64) {
+
+    }
+
+    async setupAzureRecognizer() {
+        console.log(`Setting up Azure recognizer `);
+      
+        const speechConfig = speechSdk.SpeechConfig.fromSubscription(
+          this.env.AZURE_SPEECH_KEY,
+          this.env.AZURE_SPEECH_REGION
+        );
+        speechConfig.speechRecognitionLanguage = 'en-US';
+      
+        const pushStream = speechSdk.AudioInputStream.createPushStream();
+        const audioConfig = speechSdk.AudioConfig.fromStreamInput(pushStream);
+        const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
+      
+        // 🔹 Intermediate results while caller is speaking
+        recognizer.recognizing = (s, e) => {
+          if (e.result.reason === speechSdk.ResultReason.RecognizingSpeech) {
+            console.log(`Partial: "${e.result.text}"`);
+          }
+        };
+      
+        // 🔹 Finalized sentences
+        recognizer.recognized = async (s, e) => {
+          if (e.result.reason === speechSdk.ResultReason.RecognizedSpeech) {
+            const transcript = e.result.text;
+            console.log(`Final: "${transcript}"`);
+            await this.updateCallTranscript(callSid, transcript);
+            this.broadcastTranscription(callSid, transcript, 'final');
+          } else if (e.result.reason === speechSdk.ResultReason.NoMatch) {
+            console.warn(`No speech recognized for`);
+          }
+        };
+      
+        recognizer.canceled = (s, e) => {
+          console.error(`Recognition canceled: ${e.errorDetails}`);
+        };
+      
+        recognizer.sessionStopped = () => {
+          console.log(`Recognition session stopped`);
+        };
+      
+        // 🔹 Must call like this (not with await)
+        recognizer.startContinuousRecognitionAsync(
+          () => console.log(`Continuous recognition started`),
+          err => console.error("Failed to start recognition:", err)
+        );
+      
+        return { recognizer, pushStream };
+      }
+// Azure Speech API transcription function
+async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
+    try {
+      let finalAudioBuffer;
+  
+      if (audioBuffer) {
+        // Audio data already provided (for direct upload)
+        finalAudioBuffer = audioBuffer;
+      } 
+      // Configure Azure Speech SDK for REST API
+      const speechConfig = speechSdk.SpeechConfig.fromSubscription(this.env.AZURE_SPEECH_KEY, this.env.AZURE_SPEECH_REGION);
+      speechConfig.speechRecognitionLanguage = 'en-AU';
+      speechConfig.setProperty(
+        speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs,
+        "1500" // 1.5 sec pause = end of sentence
+      );
+  
+      const audioConfig = speechSdk.AudioConfig.fromWavFileInput(new Uint8Array(finalAudioBuffer));
+      const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
+  
+      return new Promise((resolve, reject) => {
+        recognizer.recognizeOnceAsync(
+          result => {
+            if (result.reason === speechSdk.ResultReason.RecognizedSpeech) {
+              resolve(result.text || 'No speech detected');
+            } else {
+              reject(new Error(`Recognition failed: ${result.errorDetails}`));
+            }
+            recognizer.close();
+          },
+          error => {
+            reject(new Error(`Recognition error: ${error}`));
+            recognizer.close();
+          }
+        );
+      });
+    } catch (error) {
+      console.error('Azure transcription error:', error);
+      throw error;
+    }
+  }
   
     async callGeminiAPI(audioBase64) {
       // Note: Current Gemini API doesn't support direct audio input
@@ -568,7 +665,11 @@ export default {
       
       try {
         // Placeholder for speech-to-text conversion
-        const transcribedText = await this.speechToText(audioBase64);
+        // const transcribedText = await this.speechToText(audioBase64);
+        // Transcribe using audio buffer
+        const transcribedText = await transcribeWithAzureAPI(null, audioBase64);
+
+        console.log(`transcribed text: ${transcribedText}`);
         
         if (!transcribedText) return null;
         
