@@ -646,68 +646,64 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
       throw error;
     }
   }
-  // Process raw μ-law audio from Twilio
+  // Process raw μ-law audio from Twilio with robust decoding
   async processRawAudio(base64MuLawAudio) {
     try {
         console.log('Processing raw μ-law audio, original length:', base64MuLawAudio.length);
         
-        // Try multiple approaches to handle the base64 data
-        let wavBuffer;
-        let attempts = 0;
-        const maxAttempts = 3;
+        // Try different approaches in order of preference
+        const approaches = [
+            { name: 'robust_wav', method: () => this.createMuLawWav(base64MuLawAudio) },
+            { name: 'direct_raw', method: () => this.transcribeRawAudio(base64MuLawAudio) },
+            { name: 'cleaned_retry', method: () => {
+                const cleaned = this.cleanBase64(base64MuLawAudio);
+                return this.createMuLawWav(cleaned);
+            }}
+        ];
         
-        while (attempts < maxAttempts) {
+        let transcription = null;
+        
+        for (const approach of approaches) {
             try {
-                attempts++;
-                console.log(`Attempt ${attempts} to create WAV buffer`);
+                console.log(`Trying approach: ${approach.name}`);
                 
-                if (attempts === 1) {
-                    // First attempt: use the data as-is
-                    wavBuffer = this.createMuLawWav(base64MuLawAudio);
-                } else if (attempts === 2) {
-                    // Second attempt: try additional cleaning
-                    const extraCleanedAudio = this.extraCleanBase64(base64MuLawAudio);
-                    wavBuffer = this.createMuLawWav(extraCleanedAudio);
+                if (approach.name === 'direct_raw') {
+                    // This method handles its own transcription
+                    transcription = await approach.method();
                 } else {
-                    // Third attempt: try to salvage what we can
-                    const salvagedAudio = this.salvageBase64(base64MuLawAudio);
-                    wavBuffer = this.createMuLawWav(salvagedAudio);
+                    // These methods create WAV buffers
+                    const wavBuffer = await approach.method();
+                    if (wavBuffer && wavBuffer.byteLength > 44) {
+                        console.log(`WAV buffer created: ${wavBuffer.byteLength} bytes`);
+                        transcription = await this.transcribeWithAzureRESTAPI(wavBuffer);
+                    }
                 }
                 
-                if (wavBuffer && wavBuffer.byteLength > 44) {
-                    console.log(`Successfully created WAV buffer on attempt ${attempts}`);
+                if (transcription && transcription.trim() && transcription !== 'No speech detected') {
+                    console.log(`Success with approach: ${approach.name}`);
                     break;
                 }
                 
-            } catch (attemptError) {
-                console.warn(`Attempt ${attempts} failed:`, attemptError.message);
-                if (attempts === maxAttempts) {
-                    throw attemptError;
-                }
+            } catch (approachError) {
+                console.warn(`Approach ${approach.name} failed:`, approachError.message);
+                continue;
             }
         }
         
-        if (!wavBuffer || wavBuffer.byteLength <= 44) {
-            throw new Error('Failed to create valid WAV buffer after all attempts');
+        if (!transcription || transcription.trim() === '' || transcription === 'No speech detected') {
+            return "No speech detected";
         }
         
-        // Send to Azure for transcription
-        const transcription = await this.transcribeWithAzureRESTAPI(wavBuffer);
         console.log('Transcription result:', transcription);
         
-        if (transcription && transcription.trim() && transcription !== 'No speech detected') {
-            // Process with Gemini
-            const aiResponse = await this.processText(transcription);
-            return aiResponse;
-        }
-        
-        return "No speech detected";
+        // Process with Gemini
+        const aiResponse = await this.processText(transcription);
+        return aiResponse;
         
     } catch (error) {
         console.error('Raw audio processing error:', error);
         return `Audio processing failed: ${error.message}`;
     }
-    
 }
 
     // Robust base64 cleaning function
@@ -852,40 +848,172 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
             this.isProcessing = false;
         }
     }
-// Create a proper μ-law WAV file from base64 μ-law data
+// Robust base64 decoding with multiple strategies
+robustBase64Decode(base64String) {
+    console.log('=== Robust Base64 Decode ===');
+    console.log('Input length:', base64String.length);
+    console.log('First 50 chars:', base64String.substring(0, 50));
+    
+    const strategies = [
+        'direct',
+        'cleaned',
+        'chunked',
+        'partial',
+        'urlSafe'
+    ];
+    
+    for (const strategy of strategies) {
+        try {
+            console.log(`Trying strategy: ${strategy}`);
+            const result = this.decodeWithStrategy(base64String, strategy);
+            
+            if (result && result.length > 0) {
+                console.log(`Success with strategy: ${strategy}, decoded ${result.length} bytes`);
+                return result;
+            }
+            
+        } catch (error) {
+            console.log(`Strategy ${strategy} failed: ${error.message}`);
+        }
+    }
+    
+    throw new Error('All base64 decode strategies failed');
+}
+
+decodeWithStrategy(base64String, strategy) {
+    let processedString = base64String;
+    
+    switch (strategy) {
+        case 'direct':
+            // Try as-is
+            return this.safeAtob(processedString);
+            
+        case 'cleaned':
+            // Clean and re-pad
+            processedString = base64String.replace(/[^A-Za-z0-9+/=]/g, '');
+            const remainder = processedString.length % 4;
+            if (remainder > 0) {
+                processedString += '='.repeat(4 - remainder);
+            }
+            return this.safeAtob(processedString);
+            
+        case 'chunked':
+            // Try decoding in smaller chunks and combining
+            return this.decodeInChunks(base64String);
+            
+        case 'partial':
+            // Try decoding just a portion that might be valid
+            const validPortion = this.findValidBase64Portion(base64String);
+            if (validPortion && validPortion.length >= 100) {
+                return this.safeAtob(validPortion);
+            }
+            return null;
+            
+        case 'urlSafe':
+            // Try URL-safe base64 conversion
+            processedString = base64String.replace(/-/g, '+').replace(/_/g, '/');
+            const urlRemainder = processedString.length % 4;
+            if (urlRemainder > 0) {
+                processedString += '='.repeat(4 - urlRemainder);
+            }
+            return this.safeAtob(processedString);
+            
+        default:
+            throw new Error(`Unknown strategy: ${strategy}`);
+    }
+}
+
+safeAtob(base64String) {
+    try {
+        const binaryString = atob(base64String);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes;
+    } catch (error) {
+        throw new Error(`atob failed: ${error.message}`);
+    }
+}
+
+decodeInChunks(base64String) {
+    console.log('Attempting chunked decode...');
+    const chunkSize = 1000; // Process in 1KB chunks
+    const results = [];
+    
+    for (let i = 0; i < base64String.length; i += chunkSize) {
+        let chunk = base64String.substring(i, i + chunkSize);
+        
+        // Ensure chunk is properly padded
+        const remainder = chunk.length % 4;
+        if (remainder > 0) {
+            chunk += '='.repeat(4 - remainder);
+        }
+        
+        try {
+            const decoded = this.safeAtob(chunk);
+            results.push(decoded);
+            console.log(`Chunk ${Math.floor(i / chunkSize)} decoded successfully`);
+        } catch (error) {
+            console.log(`Chunk ${Math.floor(i / chunkSize)} failed: ${error.message}`);
+            // Continue with other chunks
+        }
+    }
+    
+    if (results.length === 0) {
+        throw new Error('No chunks could be decoded');
+    }
+    
+    // Combine all successful chunks
+    const totalLength = results.reduce((sum, chunk) => sum + chunk.length, 0);
+    const combined = new Uint8Array(totalLength);
+    let offset = 0;
+    
+    for (const chunk of results) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+    }
+    
+    console.log(`Combined ${results.length} chunks into ${combined.length} bytes`);
+    return combined;
+}
+
+findValidBase64Portion(base64String) {
+    console.log('Looking for valid base64 portion...');
+    
+    // Find the longest sequence of valid base64 characters
+    const matches = base64String.match(/[A-Za-z0-9+/=]{100,}/g);
+    
+    if (!matches || matches.length === 0) {
+        return null;
+    }
+    
+    // Get the longest match
+    const longest = matches.reduce((a, b) => a.length > b.length ? a : b);
+    console.log(`Found valid portion: ${longest.length} chars`);
+    
+    // Ensure proper padding
+    const remainder = longest.length % 4;
+    if (remainder > 0) {
+        return longest + '='.repeat(4 - remainder);
+    }
+    
+    return longest;
+}
+
+// Updated createMuLawWav with robust decoding
 createMuLawWav(base64MuLawData) {
     try {
-        console.log('=== Base64 Cleaning Debug ===');
-        console.log('Original base64 length:', base64MuLawData.length);
-        console.log('First 100 chars:', base64MuLawData.substring(0, 100));
-        console.log('Last 100 chars:', base64MuLawData.substring(Math.max(0, base64MuLawData.length - 100)));
+        console.log('=== Creating μ-law WAV with robust decoding ===');
         
-        // Clean and validate base64 data
-        let cleanedBase64 = this.cleanBase64(base64MuLawData);
+        // Use robust decoding instead of direct atob
+        const muLawBytes = this.robustBase64Decode(base64MuLawData);
         
-        if (!cleanedBase64 || cleanedBase64.length === 0) {
-            throw new Error('No valid base64 data after cleaning');
+        if (!muLawBytes || muLawBytes.length === 0) {
+            throw new Error('No valid audio data after robust decoding');
         }
         
-        console.log('Cleaned base64 length:', cleanedBase64.length);
-        console.log('Cleaned first 50 chars:', cleanedBase64.substring(0, 50));
-        
-        // Decode base64 to get raw μ-law bytes
-        let binaryString;
-        try {
-            binaryString = atob(cleanedBase64);
-        } catch (atobError) {
-            console.error('atob failed on cleaned data:', atobError);
-            console.log('Problematic base64 sample:', cleanedBase64.substring(0, 200));
-            throw new Error(`Base64 decode failed: ${atobError.message}`);
-        }
-        
-        const muLawBytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-            muLawBytes[i] = binaryString.charCodeAt(i);
-        }
-        
-        console.log('Decoded μ-law data, size:', muLawBytes.length);
+        console.log(`Successfully decoded ${muLawBytes.length} μ-law bytes`);
         
         // Create WAV header for μ-law format
         const sampleRate = 8000;
@@ -921,13 +1049,74 @@ createMuLawWav(base64MuLawData) {
         // Copy μ-law data
         new Uint8Array(wavBuffer, 44).set(muLawBytes);
         
-        console.log('Created μ-law WAV file, total size:', wavBuffer.byteLength);
+        console.log(`Created μ-law WAV: ${wavBuffer.byteLength} total bytes`);
         return wavBuffer;
         
     } catch (error) {
-        console.error('Error creating μ-law WAV:', error);
+        console.error('Error creating μ-law WAV with robust decoding:', error);
         throw error;
     }
+}
+
+// Alternative: Skip WAV creation and send raw audio to Azure
+async transcribeRawAudio(base64MuLawData) {
+    try {
+        console.log('=== Direct Raw Audio Transcription ===');
+        
+        // Decode the μ-law data
+        const muLawBytes = this.robustBase64Decode(base64MuLawData);
+        
+        // Convert μ-law to PCM directly (without WAV wrapper)
+        const pcmData = this.convertRawMuLawToPCM(muLawBytes);
+        
+        // Create minimal PCM WAV for Azure
+        const pcmWav = this.createSimplePcmWav(pcmData);
+        
+        return await this.transcribeWithAzureRESTAPI(pcmWav);
+        
+    } catch (error) {
+        console.error('Raw audio transcription error:', error);
+        throw error;
+    }
+}
+
+convertRawMuLawToPCM(muLawBytes) {
+    const pcmData = new Int16Array(muLawBytes.length);
+    
+    for (let i = 0; i < muLawBytes.length; i++) {
+        pcmData[i] = this.ulawToPcm(muLawBytes[i]);
+    }
+    
+    return pcmData;
+}
+
+createSimplePcmWav(pcmData) {
+    const sampleRate = 8000;
+    const channels = 1;
+    const dataSize = pcmData.byteLength;
+    const fileSize = 44 + dataSize - 8;
+    
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+    
+    // Simple PCM WAV header
+    view.setUint32(0, 0x46464952, true); // 'RIFF'
+    view.setUint32(4, fileSize, true);
+    view.setUint32(8, 0x45564157, true); // 'WAVE'
+    view.setUint32(12, 0x20746D66, true); // 'fmt '
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM format
+    view.setUint16(22, channels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * channels * 2, true);
+    view.setUint16(32, channels * 2, true);
+    view.setUint16(34, 16, true);
+    view.setUint32(36, 0x61746164, true); // 'data'
+    view.setUint32(40, dataSize, true);
+    
+    new Uint8Array(buffer, 44).set(new Uint8Array(pcmData.buffer));
+    
+    return buffer;
 }
 
 // Updated transcription method that works with the corrected input
