@@ -1127,8 +1127,8 @@ async transcribeWithAzureRESTAPI(audioBuffer) {
         
         // The buffer should now be a proper μ-law WAV file
         // Convert it to PCM for Azure (Azure expects PCM, not μ-law)
-        const pcmBuffer = this.convertMuLawToPcmWav(audioBuffer);
-        
+        // const pcmBuffer = this.convertMuLawToPcmWav(audioBuffer);
+        const pcmBuffer = audioBuffer;
         const baseUrl = `https://${this.env.AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`;
         const params = new URLSearchParams({
             'language': 'en-AU',
