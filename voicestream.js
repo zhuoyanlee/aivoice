@@ -328,148 +328,6 @@ export default {
         }
         
       }
-    // Robust base64 cleaning function
-    cleanBase64(base64String) {
-        try {
-            if (!base64String || typeof base64String !== 'string') {
-                console.warn('Invalid base64 input: not a string');
-                return '';
-            }
-            
-            // Remove all whitespace (spaces, tabs, newlines, etc.)
-            let cleaned = base64String.replace(/\s+/g, '');
-            
-            // Remove any characters that aren't valid base64
-            // Valid base64 chars: A-Z, a-z, 0-9, +, /, =
-            cleaned = cleaned.replace(/[^A-Za-z0-9+/=]/g, '');
-            
-            if (cleaned.length === 0) {
-                console.warn('Empty string after cleaning');
-                return '';
-            }
-            
-            // Check for obviously invalid patterns
-            if (cleaned.includes('==') && !cleaned.endsWith('==')) {
-                console.warn('Invalid padding in middle of string');
-            }
-            
-            if (cleaned.includes('=') && !cleaned.endsWith('=') && !cleaned.endsWith('==')) {
-                console.warn('Invalid padding position');
-            }
-            
-            // Ensure proper padding
-            const remainder = cleaned.length % 4;
-            if (remainder > 0) {
-                const paddingNeeded = 4 - remainder;
-                cleaned += '='.repeat(paddingNeeded);
-                console.log(`Added ${paddingNeeded} padding characters`);
-            }
-            
-            // Final validation - try to validate it's actually valid base64
-            if (cleaned.length < 4) {
-                console.warn('Base64 string too short after cleaning');
-                return '';
-            }
-            
-            // Test decode a small portion to validate
-            try {
-                const testSample = cleaned.substring(0, Math.min(100, cleaned.length));
-                // Ensure test sample has proper padding
-                const testRemainder = testSample.length % 4;
-                const testString = testRemainder === 0 ? testSample : testSample + '='.repeat(4 - testRemainder);
-                atob(testString);
-                console.log('Base64 validation test passed');
-            } catch (testError) {
-                console.warn('Base64 validation test failed:', testError.message);
-                console.log('Test string was:', cleaned.substring(0, Math.min(100, cleaned.length)));
-                // Don't throw here, maybe the full string is valid even if the sample isn't
-            }
-            
-            return cleaned;
-            
-        } catch (error) {
-            console.error('Base64 cleaning error:', error);
-            return '';
-        }
-    }
-    
-    // Extra aggressive base64 cleaning
-    extraCleanBase64(base64String) {
-        try {
-            console.log('Applying extra base64 cleaning...');
-            
-            if (!base64String) return '';
-            
-            // Start with basic cleaning
-            let cleaned = this.cleanBase64(base64String);
-            
-            if (!cleaned) {
-                // Try character-by-character filtering
-                cleaned = '';
-                for (let i = 0; i < base64String.length; i++) {
-                    const char = base64String[i];
-                    if (/[A-Za-z0-9+/=]/.test(char)) {
-                        cleaned += char;
-                    }
-                }
-                
-                // Re-pad
-                const remainder = cleaned.length % 4;
-                if (remainder > 0) {
-                    cleaned += '='.repeat(4 - remainder);
-                }
-            }
-            
-            return cleaned;
-            
-        } catch (error) {
-            console.error('Extra cleaning error:', error);
-            return '';
-        }
-    }
-    // Salvage whatever base64 data we can
-    salvageBase64(base64String) {
-        try {
-            console.log('Attempting to salvage base64 data...');
-            
-            if (!base64String) return '';
-            
-            // Find the longest valid base64 sequence
-            const validChars = base64String.match(/[A-Za-z0-9+/=]+/g);
-            
-            if (!validChars || validChars.length === 0) {
-                console.warn('No valid base64 sequences found');
-                return '';
-            }
-            
-            // Use the longest sequence
-            const longestSequence = validChars.reduce((longest, current) => 
-                current.length > longest.length ? current : longest, '');
-            
-            console.log(`Salvaged ${longestSequence.length} chars from ${base64String.length}`);
-            
-            // Ensure proper padding
-            const remainder = longestSequence.length % 4;
-            let salvaged = longestSequence;
-            if (remainder > 0) {
-                salvaged += '='.repeat(4 - remainder);
-            }
-            
-            // Minimum viable size check
-            if (salvaged.length < 100) {
-                console.warn('Salvaged data too small to be useful');
-                return '';
-            }
-            
-            return salvaged;
-            
-         
-        } catch (error) {
-            console.error('Salvage Audio processing error:', error);
-        } finally {
-            this.isProcessing = false;
-        }
-    }
       convertULawToPCM(base64ULaw) {
         try {
           // Validate and clean base64 data
@@ -693,9 +551,6 @@ export default {
       return pcmData;
     }
     
-    async callN8nAPI(audioBase64) {
-
-    }
 
     async setupAzureRecognizer() {
         console.log(`Setting up Azure recognizer `);
@@ -852,8 +707,151 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
         console.error('Raw audio processing error:', error);
         return `Audio processing failed: ${error.message}`;
     }
+    
 }
 
+    // Robust base64 cleaning function
+    cleanBase64(base64String) {
+        try {
+            if (!base64String || typeof base64String !== 'string') {
+                console.warn('Invalid base64 input: not a string');
+                return '';
+            }
+            
+            // Remove all whitespace (spaces, tabs, newlines, etc.)
+            let cleaned = base64String.replace(/\s+/g, '');
+            
+            // Remove any characters that aren't valid base64
+            // Valid base64 chars: A-Z, a-z, 0-9, +, /, =
+            cleaned = cleaned.replace(/[^A-Za-z0-9+/=]/g, '');
+            
+            if (cleaned.length === 0) {
+                console.warn('Empty string after cleaning');
+                return '';
+            }
+            
+            // Check for obviously invalid patterns
+            if (cleaned.includes('==') && !cleaned.endsWith('==')) {
+                console.warn('Invalid padding in middle of string');
+            }
+            
+            if (cleaned.includes('=') && !cleaned.endsWith('=') && !cleaned.endsWith('==')) {
+                console.warn('Invalid padding position');
+            }
+            
+            // Ensure proper padding
+            const remainder = cleaned.length % 4;
+            if (remainder > 0) {
+                const paddingNeeded = 4 - remainder;
+                cleaned += '='.repeat(paddingNeeded);
+                console.log(`Added ${paddingNeeded} padding characters`);
+            }
+            
+            // Final validation - try to validate it's actually valid base64
+            if (cleaned.length < 4) {
+                console.warn('Base64 string too short after cleaning');
+                return '';
+            }
+            
+            // Test decode a small portion to validate
+            try {
+                const testSample = cleaned.substring(0, Math.min(100, cleaned.length));
+                // Ensure test sample has proper padding
+                const testRemainder = testSample.length % 4;
+                const testString = testRemainder === 0 ? testSample : testSample + '='.repeat(4 - testRemainder);
+                atob(testString);
+                console.log('Base64 validation test passed');
+            } catch (testError) {
+                console.warn('Base64 validation test failed:', testError.message);
+                console.log('Test string was:', cleaned.substring(0, Math.min(100, cleaned.length)));
+                // Don't throw here, maybe the full string is valid even if the sample isn't
+            }
+            
+            return cleaned;
+            
+        } catch (error) {
+            console.error('Base64 cleaning error:', error);
+            return '';
+        }
+    }
+    
+    // Extra aggressive base64 cleaning
+    extraCleanBase64(base64String) {
+        try {
+            console.log('Applying extra base64 cleaning...');
+            
+            if (!base64String) return '';
+            
+            // Start with basic cleaning
+            let cleaned = this.cleanBase64(base64String);
+            
+            if (!cleaned) {
+                // Try character-by-character filtering
+                cleaned = '';
+                for (let i = 0; i < base64String.length; i++) {
+                    const char = base64String[i];
+                    if (/[A-Za-z0-9+/=]/.test(char)) {
+                        cleaned += char;
+                    }
+                }
+                
+                // Re-pad
+                const remainder = cleaned.length % 4;
+                if (remainder > 0) {
+                    cleaned += '='.repeat(4 - remainder);
+                }
+            }
+            
+            return cleaned;
+            
+        } catch (error) {
+            console.error('Extra cleaning error:', error);
+            return '';
+        }
+    }
+    // Salvage whatever base64 data we can
+    salvageBase64(base64String) {
+        try {
+            console.log('Attempting to salvage base64 data...');
+            
+            if (!base64String) return '';
+            
+            // Find the longest valid base64 sequence
+            const validChars = base64String.match(/[A-Za-z0-9+/=]+/g);
+            
+            if (!validChars || validChars.length === 0) {
+                console.warn('No valid base64 sequences found');
+                return '';
+            }
+            
+            // Use the longest sequence
+            const longestSequence = validChars.reduce((longest, current) => 
+                current.length > longest.length ? current : longest, '');
+            
+            console.log(`Salvaged ${longestSequence.length} chars from ${base64String.length}`);
+            
+            // Ensure proper padding
+            const remainder = longestSequence.length % 4;
+            let salvaged = longestSequence;
+            if (remainder > 0) {
+                salvaged += '='.repeat(4 - remainder);
+            }
+            
+            // Minimum viable size check
+            if (salvaged.length < 100) {
+                console.warn('Salvaged data too small to be useful');
+                return '';
+            }
+            
+            return salvaged;
+            
+         
+        } catch (error) {
+            console.error('Salvage Audio processing error:', error);
+        } finally {
+            this.isProcessing = false;
+        }
+    }
 // Create a proper μ-law WAV file from base64 μ-law data
 createMuLawWav(base64MuLawData) {
     try {
