@@ -273,210 +273,263 @@ export default {
     }
   
     async processAudioChunk(base64Audio) {
-      // Validate input
-      if (!base64Audio || typeof base64Audio !== 'string') {
-        console.warn('Invalid audio chunk received');
-        return;
-      }
-      
-      // Convert base64 to audio buffer
-      this.audioBuffer.push(base64Audio);
-      
-      console.log(`Audio chunk received, buffer size: ${this.audioBuffer.length}, chunk length: ${base64Audio.length}`);
-      
-      // Send acknowledgment that we received the audio
-      this.websocket.send(JSON.stringify({
-        event: 'media_ack',
-        streamSid: this.streamSid,
-        received_chunks: this.audioBuffer.length,
-        chunk_length: base64Audio.length
-      }));
-      
-      // Process audio in chunks to avoid overwhelming the system
-      if (this.audioBuffer.length >= 10 && !this.isProcessing) {
-        this.isProcessing = true;
+        // Validate input
+        if (!base64Audio || typeof base64Audio !== 'string') {
+          console.warn('Invalid audio chunk received:', typeof base64Audio);
+          return;
+        }
         
-        try {
-          // Combine audio chunks with validation
-          const validChunks = this.audioBuffer.filter(chunk => 
-            chunk && typeof chunk === 'string' && chunk.length > 0
-          );
+        if (base64Audio.length === 0) {
+          console.warn('Empty audio chunk received');
+          return;
+        }
+        
+        // Log some info about the incoming audio
+        console.log(`Audio chunk received - Length: ${base64Audio.length}, Sample: "${base64Audio.substring(0, 20)}..."`);
+        
+        // Convert base64 to audio buffer
+        this.audioBuffer.push(base64Audio);
+        
+        // Send acknowledgment that we received the audio
+        this.websocket.send(JSON.stringify({
+          event: 'media_ack',
+          streamSid: this.streamSid,
+          received_chunks: this.audioBuffer.length,
+          chunk_length: base64Audio.length,
+          chunk_sample: base64Audio.substring(0, 20)
+        }));
+        
+        // Process audio in smaller chunks initially for testing
+        if (this.audioBuffer.length >= 5 && !this.isProcessing) {
+          this.isProcessing = true;
           
-          if (validChunks.length === 0) {
-            console.warn('No valid audio chunks to process');
-            this.audioBuffer = [];
-            return;
-          }
-          
-          const combinedAudio = validChunks.join('');
-          this.audioBuffer = [];
-          
-          console.log('Processing combined audio chunks, total length:', combinedAudio.length);
-          
-          // Convert μ-law to linear PCM for processing
-          const pcmAudio = this.convertULawToPCM(combinedAudio);
-          
-          if (pcmAudio.length === 0) {
-            console.warn('PCM conversion resulted in empty data');
-            return;
-          }
-          
-          console.log(`Converted to PCM, length: ${pcmAudio.length}`);
-          
-          // Send to Gemini for processing
-          const response = await this.geminiHandler.processAudio(pcmAudio);
-          
-          if (response) {
-            console.log('Got response from Gemini, converting back to audio...');
-            // Convert Gemini's response back to μ-law and send to Twilio
-            const ulawResponse = this.convertPCMToULaw(response);
-            if (ulawResponse) {
-              await this.sendAudioToTwilio(ulawResponse);
-            }
-          } else {
-            console.log('No audio response from Gemini (STT/TTS not implemented)');
+          try {
+            // Take only the first few chunks to avoid overwhelming
+            const chunksToProcess = this.audioBuffer.splice(0, 5);
             
-            // For testing: send a status update
+            // Log details about what we're processing
+            console.log(`Processing ${chunksToProcess.length} audio chunks:`);
+            chunksToProcess.forEach((chunk, i) => {
+              console.log(`  Chunk ${i}: length=${chunk.length}, sample="${chunk.substring(0, 10)}..."`);
+            });
+            
+            // Test each chunk individually first
+            const validChunks = [];
+            for (let i = 0; i < chunksToProcess.length; i++) {
+              const chunk = chunksToProcess[i];
+              if (chunk && typeof chunk === 'string' && chunk.length > 0) {
+                // Try to decode this chunk to see if it's valid
+                try {
+                  const testPcm = this.convertULawToPCM(chunk);
+                  if (testPcm.length > 0) {
+                    validChunks.push(chunk);
+                    console.log(`  ✓ Chunk ${i} valid: ${testPcm.length} PCM samples`);
+                  } else {
+                    console.log(`  ✗ Chunk ${i} invalid: no PCM data generated`);
+                  }
+                } catch (chunkError) {
+                  console.log(`  ✗ Chunk ${i} error:`, chunkError.message);
+                }
+              } else {
+                console.log(`  ✗ Chunk ${i} invalid: bad format`);
+              }
+            }
+            
+            if (validChunks.length === 0) {
+              console.warn('No valid audio chunks to process');
+              this.websocket.send(JSON.stringify({
+                event: 'processing_error',
+                streamSid: this.streamSid,
+                error: 'No valid base64 audio chunks found',
+                total_chunks: chunksToProcess.length
+              }));
+              return;
+            }
+            
+            console.log(`Found ${validChunks.length} valid chunks out of ${chunksToProcess.length}`);
+            
+            // Process the first valid chunk only for now
+            const firstValidChunk = validChunks[0];
+            console.log('Processing first valid chunk...');
+            
+            const pcmAudio = this.convertULawToPCM(firstValidChunk);
+            
+            if (pcmAudio.length === 0) {
+              console.warn('PCM conversion resulted in empty data');
+              return;
+            }
+            
+            console.log(`Successfully converted to PCM: ${pcmAudio.length} samples`);
+            
+            // Send success response
             this.websocket.send(JSON.stringify({
               event: 'processing_complete',
               streamSid: this.streamSid,
-              message: 'Audio received and processed successfully',
-              pcm_samples: pcmAudio.length
+              message: 'Audio chunk processed successfully',
+              pcm_samples: pcmAudio.length,
+              valid_chunks: validChunks.length,
+              total_chunks: chunksToProcess.length
             }));
+            
+            // TODO: Send to Gemini for processing
+            // const response = await this.geminiHandler.processAudio(pcmAudio);
+            
+          } catch (error) {
+            console.error('Audio processing error:', error);
+            this.websocket.send(JSON.stringify({
+              event: 'processing_error',
+              streamSid: this.streamSid,
+              error: error.message,
+              error_type: error.constructor.name,
+              stack: error.stack?.substring(0, 200)
+            }));
+          } finally {
+            this.isProcessing = false;
+          }
+        }
+      }
+    
+      convertULawToPCM(base64ULaw) {
+        try {
+          // Validate and clean base64 data
+          if (!base64ULaw || typeof base64ULaw !== 'string') {
+            console.warn('Invalid base64 input: not a string');
+            return new Int16Array(0);
           }
           
+          // Remove any whitespace and newlines
+          let cleanBase64 = base64ULaw.replace(/\s+/g, '');
+          
+          // Remove any non-base64 characters (be more permissive)
+          cleanBase64 = cleanBase64.replace(/[^A-Za-z0-9+/=]/g, '');
+          
+          // Skip validation if string is empty after cleaning
+          if (cleanBase64.length === 0) {
+            console.warn('Empty base64 string after cleaning');
+            return new Int16Array(0);
+          }
+          
+          // More lenient base64 validation - just check for basic structure
+          if (cleanBase64.length < 4) {
+            console.warn('Base64 string too short:', cleanBase64.length);
+            return new Int16Array(0);
+          }
+          
+          // Ensure proper padding - be more flexible
+          while (cleanBase64.length % 4 !== 0) {
+            cleanBase64 += '=';
+          }
+          
+          // Try to decode - if it fails, we'll catch the error
+          let ulawData;
+          try {
+            const binaryString = atob(cleanBase64);
+            ulawData = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              ulawData[i] = binaryString.charCodeAt(i);
+            }
+          } catch (decodeError) {
+            console.error('Base64 decode failed:', decodeError);
+            console.log('Problematic base64 (first 100 chars):', cleanBase64.substring(0, 100));
+            return new Int16Array(0);
+          }
+          
+          // μ-law to linear PCM conversion
+          const pcmData = new Int16Array(ulawData.length);
+          
+          for (let i = 0; i < ulawData.length; i++) {
+            pcmData[i] = this.ulawToPcm(ulawData[i]);
+          }
+          
+          console.log(`Successfully converted ${cleanBase64.length} base64 chars to ${pcmData.length} PCM samples`);
+          return pcmData;
+          
         } catch (error) {
-          console.error('Audio processing error:', error);
-          this.websocket.send(JSON.stringify({
-            event: 'processing_error',
-            streamSid: this.streamSid,
-            error: error.message,
-            error_type: error.constructor.name
-          }));
-        } finally {
-          this.isProcessing = false;
-        }
-      }
-    }
-  
-    convertULawToPCM(base64ULaw) {
-      try {
-        // Validate and clean base64 data
-        if (!base64ULaw || typeof base64ULaw !== 'string') {
-          console.warn('Invalid base64 input: not a string');
+          console.error('Base64 conversion error:', error);
+          console.log('Input length:', base64ULaw?.length);
+          console.log('Input sample (first 50 chars):', base64ULaw?.substring(0, 50));
+          console.log('Input sample (last 50 chars):', base64ULaw?.substring(Math.max(0, base64ULaw.length - 50)));
+          
+          // Return empty array instead of throwing
           return new Int16Array(0);
         }
-        
-        // Clean the base64 string - remove any invalid characters
-        const cleanBase64 = base64ULaw.replace(/[^A-Za-z0-9+/=]/g, '');
-        
-        // Validate base64 format
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(cleanBase64)) {
-          console.warn('Invalid base64 format detected');
-          return new Int16Array(0);
-        }
-        
-        // Ensure proper padding
-        let paddedBase64 = cleanBase64;
-        while (paddedBase64.length % 4 !== 0) {
-          paddedBase64 += '=';
-        }
-        
-        // Convert base64 μ-law to ArrayBuffer
-        const ulawData = Uint8Array.from(atob(paddedBase64), c => c.charCodeAt(0));
-        
-        // μ-law to linear PCM conversion
-        const pcmData = new Int16Array(ulawData.length);
-        
-        for (let i = 0; i < ulawData.length; i++) {
-          pcmData[i] = this.ulawToPcm(ulawData[i]);
-        }
-        
-        return pcmData;
-        
-      } catch (error) {
-        console.error('Base64 conversion error:', error);
-        console.log('Problematic base64 data length:', base64ULaw?.length);
-        console.log('First 50 chars:', base64ULaw?.substring(0, 50));
-        return new Int16Array(0);
       }
-    }
-  
-    ulawToPcm(ulaw) {
-      const BIAS = 0x84;
-      const CLIP = 32635;
-      
-      ulaw = ~ulaw;
-      const sign = ulaw & 0x80;
-      const exponent = (ulaw >> 4) & 0x07;
-      const mantissa = ulaw & 0x0F;
-      
-      let sample = mantissa << (exponent + 3);
-      if (exponent !== 0) {
-        sample += BIAS << exponent;
+    
+      ulawToPcm(ulaw) {
+        const BIAS = 0x84;
+        const CLIP = 32635;
+        
+        ulaw = ~ulaw;
+        const sign = ulaw & 0x80;
+        const exponent = (ulaw >> 4) & 0x07;
+        const mantissa = ulaw & 0x0F;
+        
+        let sample = mantissa << (exponent + 3);
+        if (exponent !== 0) {
+          sample += BIAS << exponent;
+        }
+        
+        return sign ? -sample : sample;
       }
-      
-      return sign ? -sample : sample;
-    }
-  
-    convertPCMToULaw(pcmData) {
-      try {
-        if (!pcmData || pcmData.length === 0) {
-          console.warn('No PCM data to convert');
+    
+      convertPCMToULaw(pcmData) {
+        try {
+          if (!pcmData || pcmData.length === 0) {
+            console.warn('No PCM data to convert');
+            return '';
+          }
+          
+          const ulawData = new Uint8Array(pcmData.length);
+          
+          for (let i = 0; i < pcmData.length; i++) {
+            ulawData[i] = this.pcmToUlaw(pcmData[i]);
+          }
+          
+          return btoa(String.fromCharCode(...ulawData));
+          
+        } catch (error) {
+          console.error('PCM to μ-law conversion error:', error);
           return '';
         }
+      }
+    
+      pcmToUlaw(pcm) {
+        const BIAS = 0x84;
+        const CLIP = 32635;
         
-        const ulawData = new Uint8Array(pcmData.length);
-        
-        for (let i = 0; i < pcmData.length; i++) {
-          ulawData[i] = this.pcmToUlaw(pcmData[i]);
+        if (pcm < 0) {
+          pcm = -pcm;
+          var sign = 0x80;
+        } else {
+          var sign = 0x00;
         }
         
-        return btoa(String.fromCharCode(...ulawData));
+        if (pcm > CLIP) pcm = CLIP;
+        pcm += BIAS;
         
-      } catch (error) {
-        console.error('PCM to μ-law conversion error:', error);
-        return '';
-      }
-    }
-  
-    pcmToUlaw(pcm) {
-      const BIAS = 0x84;
-      const CLIP = 32635;
-      
-      if (pcm < 0) {
-        pcm = -pcm;
-        var sign = 0x80;
-      } else {
-        var sign = 0x00;
-      }
-      
-      if (pcm > CLIP) pcm = CLIP;
-      pcm += BIAS;
-      
-      let exponent = 7;
-      for (let exp = 0; exp < 8; exp++) {
-        if (pcm <= (0x1F << (exp + 3))) {
-          exponent = exp;
-          break;
+        let exponent = 7;
+        for (let exp = 0; exp < 8; exp++) {
+          if (pcm <= (0x1F << (exp + 3))) {
+            exponent = exp;
+            break;
+          }
         }
+        
+        const mantissa = (pcm >> (exponent + 3)) & 0x0F;
+        return ~(sign | (exponent << 4) | mantissa);
       }
-      
-      const mantissa = (pcm >> (exponent + 3)) & 0x0F;
-      return ~(sign | (exponent << 4) | mantissa);
-    }
-  
-    async sendAudioToTwilio(base64Audio) {
-      const mediaMessage = {
-        event: 'media',
-        streamSid: this.streamSid,
-        media: {
-          payload: base64Audio
-        }
-      };
-      
-      this.websocket.send(JSON.stringify(mediaMessage));
-    }
+    
+      async sendAudioToTwilio(base64Audio) {
+        const mediaMessage = {
+          event: 'media',
+          streamSid: this.streamSid,
+          media: {
+            payload: base64Audio
+          }
+        };
+        
+        this.websocket.send(JSON.stringify(mediaMessage));
+      }
   
     cleanup() {
       this.geminiHandler.cleanup();
@@ -670,7 +723,7 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
         const transcribedText = await transcribeWithAzureAPI(null, audioBase64);
 
         console.log(`transcribed text: ${transcribedText}`);
-        
+
         if (!transcribedText) return null;
         
         // Add to conversation history
