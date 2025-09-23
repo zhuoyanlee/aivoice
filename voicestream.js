@@ -711,7 +711,15 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
     }
   }
   // Helper to convert μ-law WAV to 16-bit PCM WAV
- convertMuLawToPcmWav(inputBuffer) {
+ // Helper to convert μ-law WAV to 16-bit PCM WAV
+convertMuLawToPcmWav(inputBuffer) {
+    // Normalize to ArrayBuffer if it's a Buffer or TypedArray
+    if (inputBuffer instanceof Buffer || inputBuffer instanceof Uint8Array) {
+      inputBuffer = inputBuffer.buffer;
+    } else if (!(inputBuffer instanceof ArrayBuffer)) {
+      throw new Error('Input buffer must be an ArrayBuffer, Buffer, or Uint8Array');
+    }
+  
     const view = new DataView(inputBuffer);
     
     // Parse original WAV header (assuming standard RIFF WAV structure)
@@ -741,8 +749,9 @@ async transcribeWithAzureAPI(audioUrl, audioBuffer = null) {
     
     // Decode μ-law to 16-bit PCM
     const pcmData = new Int16Array(dataSize);
+    const inputBytes = new Uint8Array(inputBuffer); // Use Uint8Array for byte access
     for (let i = 0; i < dataSize; i++) {
-      const mu = new Uint8Array(inputBuffer)[dataStart + i] ^ 0xFF; // Invert bits
+      const mu = inputBytes[dataStart + i] ^ 0xFF; // Invert bits
       const sign = (mu & 0x80) ? -1 : 1;
       const exponent = (mu >> 4) & 0x07;
       const mantissa = mu & 0x0F;
